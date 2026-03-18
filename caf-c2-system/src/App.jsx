@@ -51,10 +51,15 @@ const STYLES = `
   @keyframes modalIn{from{opacity:0;transform:scale(0.95);}to{opacity:1;transform:scale(1);}}
   @keyframes alertFlash{0%,100%{border-color:var(--red-alert);}50%{border-color:transparent;}}
   @keyframes mapPulse{0%{transform:scale(0.5);opacity:1;}100%{transform:scale(3);opacity:0;}}
+  @keyframes slideIn{from{transform:translateX(100%);opacity:0;}to{transform:translateX(0);opacity:1;}}
+  @keyframes briefIn{from{transform:translateY(-20px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+  @keyframes batteryFlash{0%,100%{border-color:var(--red-alert);box-shadow:0 0 8px rgba(239,68,68,0.4);}50%{border-color:transparent;box-shadow:none;}}
+  .bat-critical{animation:batteryFlash 1.2s ease-in-out infinite!important;}
   .uxs-card{transition:background 0.15s ease,border-color 0.15s ease;cursor:pointer;}
   .uxs-card:hover{background:var(--bg-highlight)!important;}
   .transmit-btn{transition:all 0.15s ease;cursor:pointer;border:none;outline:none;}
   .transmit-btn:hover:not(:disabled){transform:translateY(-1px);}
+  .kbd{display:inline-block;padding:1px 5px;background:var(--bg-highlight);border:1px solid var(--border);font-family:var(--font-mono);font-size:9px;color:var(--text-dim);border-radius:2px;}
 `;
 
 // ─────────────────────────────────────────────────────────────
@@ -109,6 +114,15 @@ const IFF_META = {
   NEUTRAL:{color:"#6b7280",bg:"rgba(107,114,128,0.1)",label:"NEUTRAL"},
 };
 
+const WAYPOINTS = [
+  {id:"WP-A", label:"Waypoint Alpha",   lat:49.2827, lng:-123.1207},
+  {id:"WP-B", label:"Waypoint Bravo",   lat:49.2900, lng:-123.1100},
+  {id:"WP-C", label:"Waypoint Charlie", lat:49.2750, lng:-123.1300},
+  {id:"WP-D", label:"Waypoint Delta",   lat:49.2680, lng:-123.1450},
+  {id:"WP-E", label:"Waypoint Echo",    lat:49.3050, lng:-123.1650},
+  {id:"WP-F", label:"Waypoint Foxtrot", lat:49.3150, lng:-123.1950},
+];
+
 // ─────────────────────────────────────────────────────────────
 // IFF ENGINE (from Step 6)
 // ─────────────────────────────────────────────────────────────
@@ -159,15 +173,13 @@ function runIFFCheck(parsedCommand, uxsList, contacts) {
 // section boundary (grid lines) drawn on one board.
 // Updates in real time as the floor changes.
 // ─────────────────────────────────────────────────────────────
-function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
-  const canvasRef = useRef(null);
+const MAP_BOUNDS = {
+  latMin: 49.240, latMax: 49.340,
+  lngMin: -123.230, lngMax: -123.060,
+};
 
-  // Map bounds — our operational area
-  // These define what lat/lng range fills the canvas
-  const MAP_BOUNDS = {
-    latMin: 49.240, latMax: 49.340,
-    lngMin: -123.230, lngMax: -123.060,
-  };
+function TacticalMap({ uxs, contacts, waypoints, selectedId, executedIds, tick, onSelectUnit }) {
+  const canvasRef = useRef(null);
 
   // Convert lat/lng to canvas x/y pixels
   const toCanvas = useCallback((lat, lng, w, h) => {
@@ -239,6 +251,23 @@ function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
       ctx.closePath();
       ctx.fill();
     };
+
+    // ── FOE THREAT PULSE RINGS ──────────────────────────────
+    // Expanding rings animate using tick % 20 (200ms × 20 = 4s cycle)
+    const phase = (tick % 20) / 20;          // 0→1 over 4 seconds
+    const phase2 = ((tick + 10) % 20) / 20;  // offset second ring
+    contacts.filter(c=>c.iff==="FOE").forEach(contact=>{
+      const {x,y}=toCanvas(contact.lat,contact.lng,W,H);
+      [phase,phase2].forEach(p=>{
+        const r=14+p*36;
+        const alpha=(1-p)*0.5;
+        ctx.strokeStyle=`rgba(239,68,68,${alpha})`;
+        ctx.lineWidth=1.5;
+        ctx.beginPath();
+        ctx.arc(x,y,r,0,Math.PI*2);
+        ctx.stroke();
+      });
+    });
 
     // ── DRAW CONTACTS ───────────────────────────────────────
     // Diamond shape with IFF color
@@ -347,15 +376,27 @@ function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
       ctx.arc(x, y, radius+3, 0, Math.PI*2);
       ctx.stroke();
 
-      // Unit ID label
+      // Label offset — connector line then text above-right
+      const lox = x + radius + 5;
+      const loy = y - radius - 8;
+      ctx.strokeStyle = domain.hex + "55";
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([2,2]);
+      ctx.beginPath();
+      ctx.moveTo(x, y - radius);
+      ctx.lineTo(lox, loy + 4);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Unit ID
       ctx.fillStyle = domain.hex;
       ctx.font = `bold ${isSelected?10:9}px 'Share Tech Mono'`;
-      ctx.fillText(unit.id, x - radius - 2, y - radius - 4);
+      ctx.fillText(unit.id, lox, loy);
 
-      // Callsign label
+      // Callsign
       ctx.fillStyle = domain.hex + "bb";
       ctx.font = "7px 'Share Tech Mono'";
-      ctx.fillText(unit.label, x - radius - 2, y - radius - 14);
+      ctx.fillText(unit.label, lox, loy - 10);
     });
 
     // ── MAP LEGEND ──────────────────────────────────────────
@@ -404,12 +445,59 @@ function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
       ctx.stroke();
     });
 
+    // ── DRAW WAYPOINTS ──────────────────────────────────────
+    // Render as orange triangles with WP label
+    (waypoints || []).forEach(wp => {
+      const {x, y} = toCanvas(wp.lat, wp.lng, W, H);
+      const WP_COLOR = "#fb923c"; // orange
+
+      // Triangle marker
+      const size = 7;
+      ctx.beginPath();
+      ctx.moveTo(x, y - size);
+      ctx.lineTo(x + size, y + size * 0.6);
+      ctx.lineTo(x - size, y + size * 0.6);
+      ctx.closePath();
+      ctx.fillStyle = `rgba(251,146,60,0.2)`;
+      ctx.fill();
+      ctx.strokeStyle = WP_COLOR;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Glow dot at center
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.fillStyle = WP_COLOR;
+      ctx.fill();
+
+      // Short ID label (WP-A etc)
+      ctx.fillStyle = WP_COLOR;
+      ctx.font = "bold 9px 'Share Tech Mono'";
+      ctx.fillText(wp.id, x + 10, y + 4);
+    });
+
     // ── COORDINATES BAR ────────────────────────────────────
     ctx.fillStyle = "rgba(0,255,65,0.15)";
     ctx.font = "9px 'Share Tech Mono'";
     ctx.fillText("49°17'N · 123°07'W · MGRS: 10U EE 23456 78901", W/2-150, H-6);
 
-  }, [uxs, contacts, selectedId, executedIds, toCanvas]);
+  }, [uxs, contacts, waypoints, selectedId, executedIds, tick, toCanvas]);
+
+  // Map click — find nearest UxS within 20px and select it
+  const handleCanvasClick = useCallback((e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
+    let closest = null, closestDist = 20;
+    uxs.forEach(unit => {
+      const {x, y} = toCanvas(unit.lat, unit.lng, canvas.width, canvas.height);
+      const d = Math.sqrt((cx-x)**2 + (cy-y)**2);
+      if (d < closestDist) { closestDist = d; closest = unit; }
+    });
+    if (closest && onSelectUnit) onSelectUnit(closest.id);
+  }, [uxs, toCanvas, onSelectUnit]);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-void)" }}>
@@ -431,6 +519,10 @@ function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
               <span style={{ fontSize:"9px", color:d.color, letterSpacing:"1px" }}>{d.label}</span>
             </div>
           ))}
+          <div style={{ display:"flex", alignItems:"center", gap:"4px" }}>
+            <div style={{ width:0, height:0, borderLeft:"5px solid transparent", borderRight:"5px solid transparent", borderBottom:"8px solid #fb923c" }}/>
+            <span style={{ fontSize:"9px", color:"#fb923c", letterSpacing:"1px" }}>WAYPOINT</span>
+          </div>
         </div>
       </div>
 
@@ -440,7 +532,8 @@ function TacticalMap({ uxs, contacts, selectedId, executedIds }) {
           ref={canvasRef}
           width={800}
           height={600}
-          style={{ width:"100%", height:"100%", display:"block" }}
+          onClick={handleCanvasClick}
+          style={{ width:"100%", height:"100%", display:"block", cursor:"crosshair" }}
         />
       </div>
     </div>
@@ -500,12 +593,159 @@ function ConfirmationModal({command,iffResult,onAuthorize,onDeny}){
 // ─────────────────────────────────────────────────────────────
 // ALL PRIOR COMPONENTS (carried forward)
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// C — UNIT DETAIL PANEL
+// Slide-in overlay on the map when a unit is selected.
+// Shows full telemetry: lat/lng, altitude, speed, heading,
+// payload, armed status, tasks, mission.
+// ─────────────────────────────────────────────────────────────
+function UnitDetailPanel({ unit, onClose }) {
+  if (!unit) return null;
+  const d = DOMAIN_META[unit.domain];
+  const sm = STATUS_META[unit.status] || STATUS_META.OFFLINE;
+  const rows = [
+    { label:"LAT",     value:`${unit.lat.toFixed(4)}°N` },
+    { label:"LNG",     value:`${unit.lng.toFixed(4)}°W` },
+    { label:"ALT",     value:`${unit.altitude}m` },
+    { label:"SPEED",   value:`${Math.round(unit.speed)} km/h` },
+    { label:"HDG",     value:`${Math.round(unit.heading)}°` },
+    { label:"BATTERY", value:`${Math.round(unit.battery)}%`, alert: unit.battery < 20 },
+    { label:"SIGNAL",  value:`${Math.round(unit.signal)}%`,  alert: unit.signal < 30 },
+    { label:"PAYLOAD", value: unit.payload },
+    { label:"MISSION", value: unit.mission },
+    { label:"ARMED",   value: unit.armed ? "YES — WEAPONS HOT" : "NO", alert: unit.armed },
+  ];
+  return (
+    <div style={{
+      position:"absolute", top:0, right:0, width:"220px", height:"100%",
+      background:"rgba(5,10,6,0.97)", borderLeft:`1px solid ${d.color}`,
+      zIndex:10, display:"flex", flexDirection:"column",
+      animation:"slideIn 0.2s ease", boxShadow:`-4px 0 20px rgba(0,0,0,0.8)`
+    }}>
+      {/* Header */}
+      <div style={{padding:"10px 12px", borderBottom:`1px solid ${d.color}`, background:`rgba(${d.hex==='#00d4ff'?'0,212,255':d.hex==='#f59e0b'?'245,158,11':'167,139,250'},0.08)`}}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+          <div>
+            <div style={{fontFamily:"var(--font-display)", fontSize:"13px", fontWeight:700, color:d.color, letterSpacing:"2px"}}>{unit.id}</div>
+            <div style={{fontSize:"12px", color:"var(--text-primary)", fontFamily:"var(--font-ui)", fontWeight:600, marginTop:"2px"}}>{unit.label}</div>
+          </div>
+          <button onClick={onClose} style={{background:"none", border:"none", cursor:"pointer", color:"var(--text-dim)", fontSize:"14px", padding:"0", lineHeight:1}}>✕</button>
+        </div>
+        <div style={{marginTop:"6px", display:"flex", gap:"6px", alignItems:"center"}}>
+          <div style={{padding:"2px 6px", background:sm.bg, border:`1px solid ${sm.color}`, fontSize:"8px", fontFamily:"var(--font-display)", letterSpacing:"1px", color:sm.color}}>{sm.label}</div>
+          <div style={{padding:"2px 6px", background:"var(--bg-card)", border:`1px solid ${d.color}`, fontSize:"8px", fontFamily:"var(--font-display)", letterSpacing:"1px", color:d.color}}>{d.label}</div>
+        </div>
+      </div>
+      {/* Telemetry rows */}
+      <div style={{flex:1, overflowY:"auto", padding:"8px 12px"}}>
+        <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"8px", marginTop:"4px"}}>TELEMETRY</div>
+        {rows.map(r => (
+          <div key={r.label} style={{display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 0", borderBottom:"1px solid var(--border)"}}>
+            <span style={{fontSize:"9px", color:"var(--text-dim)", letterSpacing:"1px"}}>{r.label}</span>
+            <span style={{fontSize:"10px", color: r.alert ? "#ef4444" : "var(--text-primary)", fontFamily:"var(--font-mono)", letterSpacing:"0.5px"}}>{r.value}</span>
+          </div>
+        ))}
+        {unit.tasks.length > 0 && (
+          <div style={{marginTop:"10px"}}>
+            <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"6px"}}>ACTIVE TASKS</div>
+            {unit.tasks.map((t,i) => (
+              <div key={i} style={{padding:"4px 8px", background:"rgba(245,158,11,0.08)", border:"1px solid rgba(245,158,11,0.2)", marginBottom:"4px"}}>
+                <span style={{fontSize:"9px", color:"var(--amber-land)", letterSpacing:"0.5px"}}>▶ {t}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{padding:"8px 12px", borderTop:"1px solid var(--border)", fontSize:"8px", color:"var(--text-dim)", letterSpacing:"1px"}}>
+        CLICK MAP UNIT TO CLOSE
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// E — MISSION BRIEF PANEL
+// Collapsible AO summary panel. Shows OPORD, threat level,
+// weather mock, and AO bounds. Toggled via map header button.
+// ─────────────────────────────────────────────────────────────
+function MissionBriefPanel({ onClose }) {
+  const foeCount  = CONTACTS.filter(c => c.iff === "FOE").length;
+  const unkCount  = CONTACTS.filter(c => c.iff === "UNKNOWN").length;
+  const threat    = foeCount >= 2 ? "HIGH" : foeCount >= 1 ? "MEDIUM" : "LOW";
+  const threatColor = threat === "HIGH" ? "#ef4444" : threat === "MEDIUM" ? "#f59e0b" : "#00ff41";
+  return (
+    <div style={{
+      position:"absolute", top:0, left:0, right:0, zIndex:20,
+      background:"rgba(5,10,6,0.97)", borderBottom:"1px solid var(--border)",
+      animation:"briefIn 0.2s ease", padding:"12px 16px"
+    }}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start"}}>
+        <div style={{display:"flex", gap:"32px", flex:1}}>
+          {/* Op details */}
+          <div>
+            <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"4px"}}>OPERATION</div>
+            <div style={{fontFamily:"var(--font-display)", fontSize:"13px", fontWeight:700, color:"var(--green-primary)", letterSpacing:"2px"}}>CEDAR SHIELD</div>
+            <div style={{fontSize:"9px", color:"var(--text-dim)", marginTop:"2px"}}>AO: GRID 49.24–49.34N · 123.06–123.23W</div>
+          </div>
+          {/* Threat */}
+          <div>
+            <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"4px"}}>THREAT LEVEL</div>
+            <div style={{fontFamily:"var(--font-display)", fontSize:"13px", fontWeight:700, color:threatColor, letterSpacing:"2px"}}>{threat}</div>
+            <div style={{fontSize:"9px", color:"var(--text-dim)", marginTop:"2px"}}>{foeCount} FOE · {unkCount} UNKNOWN</div>
+          </div>
+          {/* Weather */}
+          <div>
+            <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"4px"}}>WEATHER</div>
+            <div style={{fontFamily:"var(--font-display)", fontSize:"13px", fontWeight:700, color:"var(--cyan-air)", letterSpacing:"2px"}}>OVERCAST</div>
+            <div style={{fontSize:"9px", color:"var(--text-dim)", marginTop:"2px"}}>VIS 4km · Wind 12kt NW · Ceiling 800ft</div>
+          </div>
+          {/* OPORD summary */}
+          <div style={{flex:1, maxWidth:"320px"}}>
+            <div style={{fontSize:"8px", letterSpacing:"2px", color:"var(--text-dim)", marginBottom:"4px"}}>OPORD SUMMARY</div>
+            <div style={{fontSize:"9px", color:"var(--text-primary)", lineHeight:"1.5"}}>
+              UxS elements will conduct ISR operations within AO CEDAR SHIELD. UAV assets maintain persistent surveillance. UGV elements advance to designated checkpoints. Positive IFF confirmation required before any engagement.
+            </div>
+          </div>
+        </div>
+        <button onClick={onClose} style={{background:"none", border:"none", cursor:"pointer", color:"var(--text-dim)", fontSize:"14px", padding:"0 0 0 16px", flexShrink:0}}>✕</button>
+      </div>
+    </div>
+  );
+}
+
 function StatusBadge({status}){const m=STATUS_META[status]||STATUS_META.OFFLINE;return(<div style={{display:"inline-flex",alignItems:"center",gap:"5px",padding:"2px 7px",background:m.bg,border:`1px solid ${m.color}`}}><div style={{width:"5px",height:"5px",borderRadius:"50%",background:m.color,boxShadow:status!=="STANDBY"&&status!=="OFFLINE"?`0 0 6px ${m.color}`:"none"}}/><span style={{fontSize:"9px",fontFamily:"var(--font-display)",letterSpacing:"1px",color:m.color,fontWeight:700}}>{m.label}</span></div>);}
 function MeterBar({value,color,label}){const dc=value<20?"#ef4444":value<40?"#f59e0b":color;return(<div style={{display:"flex",alignItems:"center",gap:"6px"}}><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px",width:"16px",flexShrink:0}}>{label}</span><div style={{flex:1,height:"4px",background:"var(--bg-void)",border:"1px solid var(--border)",position:"relative",overflow:"hidden"}}><div style={{position:"absolute",left:0,top:0,bottom:0,width:`${value}%`,background:dc,boxShadow:value>20?`0 0 4px ${dc}`:"none",transition:"width 0.5s ease"}}/></div><span style={{fontSize:"9px",color:dc,letterSpacing:"1px",width:"28px",textAlign:"right",flexShrink:0}}>{Math.round(value)}%</span></div>);}
-function FleetCard({unit,selected,onClick}){const d=DOMAIN_META[unit.domain];return(<div className="uxs-card" onClick={onClick} style={{background:selected?"var(--bg-highlight)":"var(--bg-card)",border:`1px solid ${selected?d.color:"var(--border)"}`,marginBottom:"6px",position:"relative",overflow:"hidden"}}><div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:d.color,boxShadow:`0 0 8px ${d.color}`}}/><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"8px 10px 6px 12px"}}><div><div style={{display:"flex",alignItems:"center",gap:"6px"}}><span style={{fontFamily:"var(--font-display)",fontSize:"11px",fontWeight:700,color:d.color,letterSpacing:"1px"}}>{unit.id}</span>{unit.armed&&<span style={{fontSize:"8px",color:"#ef4444",border:"1px solid #ef4444",padding:"0 4px",letterSpacing:"1px"}}>ARMED</span>}</div><div style={{fontSize:"11px",color:"var(--text-primary)",fontFamily:"var(--font-ui)",fontWeight:600,marginTop:"1px"}}>{unit.label}</div></div><StatusBadge status={unit.status}/></div><div style={{padding:"0 10px 6px 12px",display:"flex",flexDirection:"column",gap:"4px"}}><MeterBar value={unit.battery} color="var(--green-primary)" label="BAT"/><MeterBar value={unit.signal} color="var(--cyan-air)" label="SIG"/></div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 10px 7px 12px",borderTop:"1px solid var(--border)"}}><div style={{display:"flex",alignItems:"center",gap:"4px"}}><span style={{fontSize:"10px",color:d.color}}>{d.icon}</span><span style={{fontSize:"9px",color:d.color,letterSpacing:"1px",fontFamily:"var(--font-display)"}}>{d.label}</span></div><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px",maxWidth:"90px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{unit.payload}</span><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px",fontFamily:"var(--font-display)"}}>{unit.mission}</span></div>{unit.tasks.length>0&&(<div style={{padding:"4px 10px 6px 12px",borderTop:"1px solid var(--border)",background:"rgba(245,158,11,0.05)"}}><span style={{fontSize:"9px",color:"var(--amber-land)",letterSpacing:"1px"}}>▶ {unit.tasks[0]}</span></div>)}</div>);}
+function FleetCard({unit,selected,onClick}){const d=DOMAIN_META[unit.domain];const batCrit=unit.battery<20;const sigLow=unit.signal<30;return(<div className={`uxs-card${batCrit?" bat-critical":""}`} onClick={onClick} style={{background:selected?"var(--bg-highlight)":"var(--bg-card)",border:`1px solid ${selected?d.color:batCrit?"var(--red-alert)":sigLow?"var(--amber-land)":"var(--border)"}`,marginBottom:"6px",position:"relative",overflow:"hidden"}}><div style={{position:"absolute",left:0,top:0,bottom:0,width:"3px",background:d.color,boxShadow:`0 0 8px ${d.color}`}}/><div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"8px 10px 6px 12px"}}><div><div style={{display:"flex",alignItems:"center",gap:"6px"}}><span style={{fontFamily:"var(--font-display)",fontSize:"11px",fontWeight:700,color:d.color,letterSpacing:"1px"}}>{unit.id}</span>{unit.armed&&<span style={{fontSize:"8px",color:"#ef4444",border:"1px solid #ef4444",padding:"0 4px",letterSpacing:"1px"}}>ARMED</span>}</div><div style={{fontSize:"11px",color:"var(--text-primary)",fontFamily:"var(--font-ui)",fontWeight:600,marginTop:"1px"}}>{unit.label}</div></div><StatusBadge status={unit.status}/></div><div style={{padding:"0 10px 6px 12px",display:"flex",flexDirection:"column",gap:"4px"}}><MeterBar value={unit.battery} color="var(--green-primary)" label="BAT"/><MeterBar value={unit.signal} color="var(--cyan-air)" label="SIG"/></div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 10px 7px 12px",borderTop:"1px solid var(--border)"}}><div style={{display:"flex",alignItems:"center",gap:"4px"}}><span style={{fontSize:"10px",color:d.color}}>{d.icon}</span><span style={{fontSize:"9px",color:d.color,letterSpacing:"1px",fontFamily:"var(--font-display)"}}>{d.label}</span></div><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px",maxWidth:"90px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{unit.payload}</span><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px",fontFamily:"var(--font-display)"}}>{unit.mission}</span></div>{unit.tasks.length>0&&(<div style={{padding:"4px 10px 6px 12px",borderTop:"1px solid var(--border)",background:"rgba(245,158,11,0.05)"}}><span style={{fontSize:"9px",color:"var(--amber-land)",letterSpacing:"1px"}}>▶ {unit.tasks[0]}</span></div>)}</div>);}
 function PanelHeader({label,icon,accent="var(--green-primary)",count}){return(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",borderBottom:"1px solid var(--border)"}}><div style={{display:"flex",alignItems:"center",gap:"10px"}}><div style={{width:"3px",height:"20px",background:accent,boxShadow:`0 0 8px ${accent}`}}/><span style={{fontFamily:"var(--font-display)",fontSize:"11px",letterSpacing:"3px",color:accent,fontWeight:700}}>{icon} {label}</span></div>{count!==undefined&&<span style={{fontSize:"10px",color:"var(--text-dim)",background:"var(--bg-highlight)",padding:"2px 8px",border:"1px solid var(--border)"}}>{count}</span>}</div>);}
 function FleetPanel({uxs,selectedId,onSelect}){const ac=uxs.filter(u=>u.status!=="STANDBY"&&u.status!=="OFFLINE").length,ar=uxs.filter(u=>u.armed).length;return(<div style={{display:"flex",flexDirection:"column",height:"100%",background:"var(--bg-panel)",borderRight:"1px solid var(--border)"}}><PanelHeader label="FLEET ROSTER" icon="◈" count={`${uxs.length} UxS`}/><div style={{display:"flex",borderBottom:"1px solid var(--border)"}}>{[{label:"TOTAL",value:uxs.length,color:"var(--text-dim)"},{label:"ACTIVE",value:ac,color:"var(--green-primary)"},{label:"ARMED",value:ar,color:ar>0?"var(--red-alert)":"var(--text-dim)"}].map((s,i)=>(<div key={s.label} style={{flex:1,padding:"8px 0",textAlign:"center",borderRight:i<2?"1px solid var(--border)":"none"}}><div style={{fontFamily:"var(--font-display)",fontSize:"16px",fontWeight:700,color:s.color}}>{s.value}</div><div style={{fontSize:"8px",color:"var(--text-dim)",letterSpacing:"2px",marginTop:"1px"}}>{s.label}</div></div>))}</div><div style={{flex:1,overflowY:"auto",padding:"8px"}}>{uxs.map(unit=>(<FleetCard key={unit.id} unit={unit} selected={selectedId===unit.id} onClick={()=>onSelect(unit.id===selectedId?null:unit.id)}/>))}</div><div style={{padding:"10px 16px",borderTop:"1px solid var(--border)",display:"flex",gap:"16px"}}>{Object.entries(DOMAIN_META).map(([key,d])=>(<div key={key} style={{display:"flex",alignItems:"center",gap:"5px"}}><div style={{width:"7px",height:"7px",borderRadius:"50%",background:d.color}}/><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px"}}>{d.label}</span></div>))}</div></div>);}
-function TopBar({time,isProcessing}){return(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:"52px",background:"var(--bg-panel)",borderBottom:`1px solid ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`,boxShadow:`0 0 20px ${isProcessing?"rgba(0,212,255,0.2)":"rgba(0,255,65,0.15)"}`,flexShrink:0,transition:"all 0.3s ease"}}><div style={{display:"flex",alignItems:"center",gap:"16px"}}><div style={{position:"relative",width:"10px",height:"10px"}}><div style={{width:"10px",height:"10px",borderRadius:"50%",background:isProcessing?"var(--cyan-air)":"var(--green-primary)",boxShadow:`0 0 8px ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`}}/><div style={{position:"absolute",inset:"-4px",borderRadius:"50%",border:`1px solid ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`,opacity:0.4,animation:"pulse 2s infinite"}}/></div><span style={{fontFamily:"var(--font-display)",fontSize:"14px",fontWeight:700,letterSpacing:"3px",color:isProcessing?"var(--cyan-air)":"var(--green-primary)",transition:"all 0.3s ease"}}>CAF C2 · UxS COMMAND</span><span style={{fontSize:"11px",color:"var(--text-dim)",letterSpacing:"1px"}}>{isProcessing?"AI PARSING COMMAND...":"VOICE-ENABLED CONTROL SYSTEM v1.0"}</span></div><div style={{padding:"4px 20px",border:"1px solid #ef4444",fontSize:"11px",fontWeight:700,letterSpacing:"4px",color:"#ef4444",fontFamily:"var(--font-display)"}}>⚠ UNCLASSIFIED // EXERCISE ONLY ⚠</div><div style={{display:"flex",alignItems:"center",gap:"24px"}}><div style={{textAlign:"right"}}><div style={{fontSize:"18px",letterSpacing:"2px",color:"var(--green-primary)",fontWeight:700}}>{time}</div><div style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"2px"}}>ZULU TIME</div></div><div style={{display:"flex",flexDirection:"column",gap:"3px"}}>{["DATALINK","IFF","VOICE"].map(sys=>(<div key={sys} style={{display:"flex",alignItems:"center",gap:"6px"}}><div style={{width:"6px",height:"6px",borderRadius:"50%",background:"var(--green-primary)",boxShadow:"0 0 4px var(--green-primary)"}}/><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px"}}>{sys}</span></div>))}</div></div></div>);}
+function TopBar({time,missionElapsed,isProcessing,wsStatus}){
+  const dlColor=wsStatus==="LIVE"?"var(--green-primary)":"var(--amber-land)";
+  return(<div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:"52px",background:"var(--bg-panel)",borderBottom:`1px solid ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`,boxShadow:`0 0 20px ${isProcessing?"rgba(0,212,255,0.2)":"rgba(0,255,65,0.15)"}`,flexShrink:0,transition:"all 0.3s ease"}}>
+    <div style={{display:"flex",alignItems:"center",gap:"16px"}}>
+      <div style={{position:"relative",width:"10px",height:"10px"}}><div style={{width:"10px",height:"10px",borderRadius:"50%",background:isProcessing?"var(--cyan-air)":"var(--green-primary)",boxShadow:`0 0 8px ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`}}/><div style={{position:"absolute",inset:"-4px",borderRadius:"50%",border:`1px solid ${isProcessing?"var(--cyan-air)":"var(--green-primary)"}`,opacity:0.4,animation:"pulse 2s infinite"}}/></div>
+      <span style={{fontFamily:"var(--font-display)",fontSize:"14px",fontWeight:700,letterSpacing:"3px",color:isProcessing?"var(--cyan-air)":"var(--green-primary)",transition:"all 0.3s ease"}}>CAF C2 · UxS COMMAND</span>
+      <span style={{fontSize:"11px",color:"var(--text-dim)",letterSpacing:"1px"}}>{isProcessing?"AI PARSING COMMAND...":"VOICE-ENABLED CONTROL SYSTEM v1.0"}</span>
+    </div>
+    <div style={{padding:"4px 20px",border:"1px solid #ef4444",fontSize:"11px",fontWeight:700,letterSpacing:"4px",color:"#ef4444",fontFamily:"var(--font-display)"}}>⚠ UNCLASSIFIED // EXERCISE ONLY ⚠</div>
+    <div style={{display:"flex",alignItems:"center",gap:"24px"}}>
+      <div style={{textAlign:"right"}}>
+        <div style={{fontSize:"18px",letterSpacing:"2px",color:"var(--green-primary)",fontWeight:700}}>{time}</div>
+        <div style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"2px"}}>ZULU TIME</div>
+      </div>
+      <div style={{textAlign:"right",borderLeft:"1px solid var(--border)",paddingLeft:"16px"}}>
+        <div style={{fontSize:"13px",letterSpacing:"2px",color:"var(--cyan-air)",fontWeight:700,fontFamily:"var(--font-display)"}}>{missionElapsed}</div>
+        <div style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"2px"}}>MISSION TIME</div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:"3px"}}>
+        <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+          <div style={{width:"6px",height:"6px",borderRadius:"50%",background:dlColor,boxShadow:`0 0 4px ${dlColor}`}}/>
+          <span style={{fontSize:"9px",color:dlColor,letterSpacing:"1px",fontWeight:wsStatus==="LIVE"?700:400}}>DATALINK: {wsStatus}</span>
+        </div>
+        {["IFF","VOICE"].map(sys=>(<div key={sys} style={{display:"flex",alignItems:"center",gap:"6px"}}><div style={{width:"6px",height:"6px",borderRadius:"50%",background:"var(--green-primary)",boxShadow:"0 0 4px var(--green-primary)"}}/><span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px"}}>{sys}</span></div>))}
+      </div>
+    </div>
+  </div>);
+}
 function VoiceWaveform({active}){if(!active)return null;return(<div style={{display:"flex",alignItems:"center",gap:"3px",height:"24px"}}>{["wave1","wave2","wave3","wave4","wave5","wave3","wave1"].map((a,i)=>(<div key={i} style={{width:"3px",height:"8px",background:"var(--red-alert)",borderRadius:"2px",animation:`${a} ${0.4+i*0.05}s ease-in-out infinite`,boxShadow:"0 0 4px var(--red-alert)"}}/>))}</div>);}
 function PipelineVisualizer({activeStage}){return(<div style={{padding:"12px 14px",borderBottom:"1px solid var(--border)"}}><div style={{fontSize:"9px",letterSpacing:"2px",color:"var(--text-dim)",marginBottom:"10px"}}>COMMAND PIPELINE</div><div style={{display:"flex",alignItems:"center",gap:"4px"}}>{PIPELINE_STAGES.map((stage,i)=>{const isActive=stage.key===activeStage,idx=PIPELINE_STAGES.findIndex(s=>s.key===activeStage),isPast=idx>-1&&i<idx;return(<div key={stage.key} style={{display:"flex",alignItems:"center",gap:"4px",flex:1}}><div style={{flex:1,padding:"5px 4px",textAlign:"center",fontSize:"8px",letterSpacing:"1px",fontFamily:"var(--font-display)",fontWeight:isActive?700:400,color:isActive?stage.color:isPast?"var(--green-dim)":"var(--text-dim)",background:"var(--bg-card)",border:`1px solid ${isActive?stage.color:isPast?"var(--green-muted)":"var(--border)"}`,boxShadow:isActive?`0 0 8px ${stage.color}`:"none",transition:"all 0.3s ease",animation:isActive?"parsePulse 1s ease-in-out infinite":"none"}}>{isPast?"✓":stage.label}</div>{i<PIPELINE_STAGES.length-1&&<span style={{fontSize:"8px",color:isPast?"var(--green-dim)":"var(--border)",flexShrink:0}}>→</span>}</div>);})}</div></div>);}
 function ParsedCommandCard({command}){if(!command)return null;const rc=command.riskLevel==="HIGH"?"var(--red-alert)":command.riskLevel==="MEDIUM"?"var(--amber-land)":"var(--green-primary)";return(<div style={{margin:"10px 14px 0",padding:"10px",background:"var(--bg-card)",border:`1px solid ${rc}`,boxShadow:`0 0 10px ${rc}33`}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}><span style={{fontSize:"9px",fontFamily:"var(--font-display)",letterSpacing:"2px",color:rc,fontWeight:700}}>◈ PARSED COMMAND</span><span style={{fontSize:"9px",padding:"1px 6px",border:`1px solid ${rc}`,color:rc,fontFamily:"var(--font-display)",letterSpacing:"1px"}}>{command.riskLevel||"LOW"} RISK</span></div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"4px 8px",marginBottom:"8px"}}>{[{label:"ACTION",value:command.action||"—"},{label:"PRIORITY",value:command.priority||"—"},{label:"TARGETS",value:(command.targets||[]).join(", ")||"—"},{label:"AREA",value:command.area||"—"}].map(f=>(<div key={f.label}><div style={{fontSize:"8px",color:"var(--text-dim)",letterSpacing:"1px",marginBottom:"1px"}}>{f.label}</div><div style={{fontSize:"10px",color:"var(--text-primary)",fontFamily:"var(--font-mono)",letterSpacing:"0.5px"}}>{f.value}</div></div>))}</div>{command.message&&<div style={{padding:"6px 8px",background:"var(--bg-void)",borderLeft:`2px solid ${rc}`}}><span style={{fontSize:"10px",color:"var(--text-dim)"}}>{command.message}</span></div>}</div>);}
@@ -545,7 +785,11 @@ function CommandPanel({isListening,voiceRaw,voiceInterim,pipelineStage,isProcess
         </div>
       </div>
       <div style={{padding:"8px 14px",borderTop:"1px solid var(--border)",display:"flex",justifyContent:"space-between",flexShrink:0}}>
-        <span style={{fontSize:"9px",color:"var(--text-dim)",letterSpacing:"1px"}}>OPERATOR: CPL SYSTEM</span>
+        <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
+          <span className="kbd">V</span><span style={{fontSize:"8px",color:"var(--text-dim)"}}>voice</span>
+          <span className="kbd">↵</span><span style={{fontSize:"8px",color:"var(--text-dim)"}}>send</span>
+          <span className="kbd">ESC</span><span style={{fontSize:"8px",color:"var(--text-dim)"}}>cancel</span>
+        </div>
         <span style={{fontSize:"9px",color:isListening?"var(--red-alert)":isProcessing?"var(--cyan-air)":"var(--text-dim)",letterSpacing:"1px"}}>{isListening?"● TRANSMITTING":isProcessing?"◈ PARSING":"SESSION ACTIVE"}</span>
       </div>
     </div>
@@ -568,18 +812,33 @@ export default function App() {
   const [parsedCommand,setParsedCommand]= useState(null);
   const [commandLog,setCommandLog]      = useState([]);
   const [pendingConfirm,setPendingConfirm] = useState(null);
-  const [executedIds,setExecutedIds]    = useState([]);  // NEW: for map pulse
+  const [executedIds,setExecutedIds]    = useState([]);
+  const [wsStatus,setWsStatus]          = useState("SIMULATED");  // G
+  const [showBrief,setShowBrief]        = useState(false);        // E
+  const [tick,setTick]                  = useState(0);            // animation tick
+  const [missionElapsed,setMissionElapsed] = useState("T+00:00:00");
 
-  const telemetryRef   = useRef(null);
-  const clockRef       = useRef(null);
-  const recognitionRef = useRef(null);
+  const telemetryRef    = useRef(null);
+  const clockRef        = useRef(null);
+  const recognitionRef  = useRef(null);
+  const alertedRef      = useRef(new Set());                      // D
+  const missionStartRef = useRef(Date.now());
+  const wsRef           = useRef(null);
 
   const addLog = useCallback((message,status="INFO")=>{
     setCommandLog(prev=>[...prev,{time:zuluNow(),message,status}]);
   },[]);
 
   useEffect(()=>{
-    clockRef.current=setInterval(()=>setTime(new Date().toUTCString().slice(17,25)+"Z"),1000);
+    clockRef.current=setInterval(()=>{
+      setTime(new Date().toUTCString().slice(17,25)+"Z");
+      const s=Math.floor((Date.now()-missionStartRef.current)/1000);
+      const h=Math.floor(s/3600).toString().padStart(2,"0");
+      const m=Math.floor((s%3600)/60).toString().padStart(2,"0");
+      const sec=(s%60).toString().padStart(2,"0");
+      setMissionElapsed(`T+${h}:${m}:${sec}`);
+      setTick(t=>t+1);
+    },200);
     return()=>clearInterval(clockRef.current);
   },[]);
 
@@ -601,6 +860,79 @@ export default function App() {
     },1500);
     return()=>clearInterval(telemetryRef.current);
   },[]);
+
+  // D — Battery / Signal alerts
+  useEffect(()=>{
+    uxs.forEach(unit=>{
+      const batKey=`${unit.id}-bat`, sigKey=`${unit.id}-sig`;
+      if(unit.battery<20&&!alertedRef.current.has(batKey)){
+        alertedRef.current.add(batKey);
+        addLog(`ALERT: ${unit.id} BATTERY CRITICAL — ${Math.round(unit.battery)}%`,"PENDING");
+      }
+      if(unit.signal<30&&!alertedRef.current.has(sigKey)){
+        alertedRef.current.add(sigKey);
+        addLog(`ALERT: ${unit.id} SIGNAL LOW — ${Math.round(unit.signal)}%`,"PENDING");
+      }
+      if(unit.battery>=25) alertedRef.current.delete(batKey);  // 5% hysteresis
+      if(unit.signal>=35)  alertedRef.current.delete(sigKey);  // 5% hysteresis
+    });
+  },[uxs,addLog]);
+
+  // Step 10 — WebSocket connection to Python backend
+  useEffect(()=>{
+    const WS_URL = "ws://127.0.0.1:8765/ws";
+    let reconnectTimer = null;
+
+    const connect = () => {
+      const ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setWsStatus("LIVE");
+        addLog("DATALINK: Backend WebSocket connected — LIVE telemetry active","EXECUTED");
+      };
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === "telemetry") {
+          setUxs(prev => prev.map(unit =>
+            unit.id === msg.droneId
+              ? { ...unit,
+                  lat:      msg.lat,
+                  lng:      msg.lng,
+                  altitude: msg.altitude,
+                  battery:  msg.battery,
+                  speed:    msg.speed,
+                  heading:  msg.heading,
+                  armed:    msg.armed,
+                  status:   msg.flightMode === "STANDBY" ? "STANDBY"
+                          : msg.flightMode === "HOLD"    ? "ACTIVE"
+                          : "EXECUTING",
+                }
+              : unit
+          ));
+        } else if (msg.type === "ack") {
+          addLog(`ACK [${msg.droneId}]: ${msg.message}`,"EXECUTED");
+        }
+      };
+
+      ws.onerror = () => {
+        setWsStatus("SIMULATED");
+      };
+
+      ws.onclose = () => {
+        setWsStatus("SIMULATED");
+        addLog("DATALINK: Backend disconnected — reverting to SIMULATED","PENDING");
+        reconnectTimer = setTimeout(connect, 4000);
+      };
+    };
+
+    connect();
+    return () => {
+      clearTimeout(reconnectTimer);
+      wsRef.current?.close();
+    };
+  },[addLog]);
 
   const startListening=useCallback(()=>{
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
@@ -639,15 +971,38 @@ export default function App() {
       const isTarget=targets.includes(unit.id)||targets.includes("ALL")||targets.includes(unit.domain);
       if(!isTarget)return unit;
       newIds.push(unit.id);
-      const newStatus=command.action==="RTB"?"RTB":command.action==="HOLD"?"ACTIVE":"EXECUTING";
-      const taskStr=command.area?`${command.action} — ${command.area}`:command.action;
-      return{...unit,status:newStatus,tasks:[taskStr]};
+      const action=command.action;
+      const newStatus=
+        action==="RTB"?"RTB":
+        action==="HOLD"?"ACTIVE":
+        action==="LAND"?"STANDBY":
+        "EXECUTING";
+      const taskStr=command.area?`${action} — ${command.area}`:action;
+      // Handle altitude changes for air units
+      const altUpdate=
+        action==="TAKEOFF"?{altitude:20,status:"ACTIVE"}:
+        action==="LAND"?{altitude:0,status:"STANDBY"}:
+        {};
+      return{...unit,status:newStatus,...altUpdate,tasks:[taskStr]};
     }));
     // Flash executed units on map
     setExecutedIds(newIds);
     setTimeout(()=>setExecutedIds([]),3000);
     setPipelineStage("EXECUTE");
     addLog(`EXECUTED: ${command.action} → [${(command.targets||[]).join(",")}]`,"EXECUTED");
+
+    // Forward to backend if WebSocket is live
+    if(wsRef.current?.readyState===WebSocket.OPEN){
+      newIds.forEach(droneId=>{
+        wsRef.current.send(JSON.stringify({
+          type:"command",
+          droneId,
+          action:command.action,
+          params:command.area?{area:command.area}:{},
+          timestamp:zuluNow(),
+        }));
+      });
+    }
     setTimeout(()=>{setPipelineStage(null);setParsedCommand(null);},3000);
   },[addLog]);
 
@@ -687,16 +1042,19 @@ export default function App() {
     addLog(`VOICE: "${text}"`,"INFO");
     const fleetSummary=INITIAL_UXS.map(u=>`${u.id} (${u.label}, ${u.domain}, status:${u.status}, armed:${u.armed})`).join("; ");
     const contactSummary=CONTACTS.map(c=>`${c.id}:${c.label}[${c.iff}]`).join(", ");
+    const waypointSummary=WAYPOINTS.map(w=>`${w.id} (${w.label})`).join(", ");
     const systemPrompt=`You are a military C2 AI for CAF Uncrewed Systems operations.
 Parse battlefield voice commands into structured JSON operational tasks.
 Available UxS fleet: ${fleetSummary}
 Known battlefield contacts: ${contactSummary}
+Named waypoints: ${waypointSummary}
 Respond with ONLY a valid JSON object. No explanation, no markdown, no backticks.
 Use this exact schema:
-{"targets":["array of UxS IDs, or ALL, or domain like AIR/LAND/MARITIME"],"action":"RECON|MOVE|HOLD|RTB|STRIKE|ENGAGE|PATROL|LOITER|SCAN|ARM|DISARM|STATUS","area":"location or sector string or null","contact":"contact ID or label if targeting a specific contact or null","priority":"IMMEDIATE|URGENT|ROUTINE","riskLevel":"HIGH|MEDIUM|LOW","message":"one sentence plain English summary of the command"}
+{"targets":["array of UxS IDs, or ALL, or domain like AIR/LAND/MARITIME"],"action":"RECON|MOVE|HOLD|RTB|STRIKE|ENGAGE|PATROL|LOITER|SCAN|ARM|DISARM|STATUS|TAKEOFF|LAND|GOTO|SCOUT","area":"location, sector, or waypoint ID (e.g. WP-A) or null","contact":"contact ID or label if targeting a specific contact or null","priority":"IMMEDIATE|URGENT|ROUTINE","riskLevel":"HIGH|MEDIUM|LOW","message":"one sentence plain English summary of the command"}
+TAKEOFF = launch an AIR unit from ground. LAND = bring an AIR unit down. GOTO = navigate to a named waypoint or area. SCOUT = advance recon of an area or contact.
 HIGH risk = any action involving weapons, engagement, strike, fire, destroy, neutralize.
-MEDIUM risk = movement into unknown or contested areas.
-LOW risk = recon, patrol, hold, RTB, status checks.`;
+MEDIUM risk = GOTO into unknown/contested areas, SCOUT near FOE contacts.
+LOW risk = TAKEOFF, LAND, RECON, PATROL, HOLD, RTB, STATUS, SCOUT in clear areas.`;
     try{
       const response=await fetch("https://api.anthropic.com/v1/messages",{
         method:"POST",
@@ -720,21 +1078,73 @@ LOW risk = recon, patrol, hold, RTB, status checks.`;
     }
   },[addLog,handleIFF]);
 
+  // F — Keyboard shortcuts (after parseCommand so deps are defined)
+  useEffect(()=>{
+    const handler=(e)=>{
+      if(e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA") return;
+      if(e.key==="v"||e.key==="V"){if(!isListening) startListening();}
+      if(e.key==="Escape"){
+        stopListening();
+        if(pendingConfirm) handleDeny();
+        else clearTranscript();
+      }
+    };
+    window.addEventListener("keydown",handler);
+    return()=>window.removeEventListener("keydown",handler);
+  },[isListening,startListening,stopListening,pendingConfirm,handleDeny,clearTranscript]);
+
+  useEffect(()=>{
+    const handler=(e)=>{
+      if(e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA") return;
+      if(e.key==="Enter"&&voiceRaw&&!isProcessing&&!isListening) parseCommand(voiceRaw);
+    };
+    window.addEventListener("keydown",handler);
+    return()=>window.removeEventListener("keydown",handler);
+  },[voiceRaw,isProcessing,isListening,parseCommand]);
+
+  const selectedUnit = uxs.find(u => u.id === selectedUxs) || null;
+
   return(
     <>
       <style>{STYLES}</style>
       <div style={{width:"100vw",height:"100vh",display:"flex",flexDirection:"column",background:"var(--bg-void)",overflow:"hidden"}}>
-        <TopBar time={time} isProcessing={isProcessing}/>
+        <TopBar time={time} missionElapsed={missionElapsed} isProcessing={isProcessing} wsStatus={wsStatus}/>
         <div style={{flex:1,display:"grid",gridTemplateColumns:"280px 1fr 320px",overflow:"hidden"}}>
           <FleetPanel uxs={uxs} selectedId={selectedUxs} onSelect={setSelectedUxs}/>
 
-          {/* NEW: TacticalMap replaces MapPanel placeholder */}
-          <TacticalMap
-            uxs={uxs}
-            contacts={CONTACTS}
-            selectedId={selectedUxs}
-            executedIds={executedIds}
-          />
+          {/* Tactical map column — position:relative so overlays work */}
+          <div style={{position:"relative",overflow:"hidden"}}>
+            <TacticalMap
+              uxs={uxs}
+              contacts={CONTACTS}
+              waypoints={WAYPOINTS}
+              selectedId={selectedUxs}
+              executedIds={executedIds}
+              tick={tick}
+              onSelectUnit={setSelectedUxs}
+            />
+            {/* E — Mission Brief toggle button in map area */}
+            <button
+              onClick={()=>setShowBrief(v=>!v)}
+              style={{position:"absolute",top:"12px",left:"50%",transform:"translateX(-50%)",
+                background:showBrief?"rgba(0,212,255,0.15)":"rgba(0,255,65,0.08)",
+                border:`1px solid ${showBrief?"var(--cyan-air)":"var(--border)"}`,
+                color:showBrief?"var(--cyan-air)":"var(--text-dim)",
+                fontFamily:"var(--font-display)",fontSize:"8px",letterSpacing:"2px",
+                padding:"4px 12px",cursor:"pointer",zIndex:5}}
+            >
+              {showBrief?"▲ CLOSE BRIEF":"▼ MISSION BRIEF"}
+            </button>
+            {/* E — Mission Brief Panel overlay */}
+            {showBrief&&<MissionBriefPanel onClose={()=>setShowBrief(false)}/>}
+            {/* C — Unit Detail Panel overlay */}
+            {selectedUnit&&(
+              <UnitDetailPanel
+                unit={selectedUnit}
+                onClose={()=>setSelectedUxs(null)}
+              />
+            )}
+          </div>
 
           <CommandPanel
             isListening={isListening} voiceRaw={voiceRaw} voiceInterim={voiceInterim}
