@@ -1,62 +1,87 @@
 # ============================================================
-# CAF C2 System — FastAPI + WebSocket Backend (Step 9)
+# CAF C2 System — FastAPI + WebSocket Backend
 #
 # Run:  uvicorn main:app --reload --port 8765
 #
-# Two endpoints:
-#   GET  /health          — server status
-#   WS   /ws              — bidirectional command/telemetry channel
-#
-# Message formats (JSON):
+# WebSocket message formats (JSON):
 #   React → Python  (command):
 #     { "type":"command", "droneId":"UAV-01", "action":"TAKEOFF",
-#       "params":{"altitude":20}, "timestamp":"21:39:58Z" }
+#       "params":{"altitude":10,"local_x":-40,"local_y":0},
+#       "timestamp":"21:39:58Z" }
 #
 #   Python → React  (telemetry, every 500ms):
-#     { "type":"telemetry", "droneId":"UAV-01", "lat":49.2831,
-#       "lng":-123.1205, "altitude":18.4, "battery":84.2,
-#       "speed":0.3, "heading":47.1, "flightMode":"HOLD",
+#     { "type":"telemetry", "droneId":"UAV-01", "lat":32.9901,
+#       "lng":-106.9752, "altitude":9.8, "battery":84.2,
+#       "speed":0.3, "heading":47.1, "flightMode":"GUIDED",
 #       "armed":true, "timestamp":"21:39:59Z" }
 #
 #   Python → React  (ack):
 #     { "type":"ack", "droneId":"UAV-01", "action":"TAKEOFF",
-#       "status":"EXECUTING", "message":"UAV-01 climbing to 20m",
+#       "status":"EXECUTING", "message":"UAV-01 armed and climbing to 10m",
 #       "timestamp":"21:39:58Z" }
 # ============================================================
 
 import asyncio
 import json
 from datetime import datetime, timezone
-
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from drone_controller import dispatch
+import drone_controller as dc
+
+# pymavlink multicast — same address the hackathon SITL uses
+SITL_ADDRESS = "mcast:"
+
 
 @asynccontextmanager
 async def lifespan(app):
+    asyncio.create_task(_connect_sitl())
     asyncio.create_task(telemetry_loop())
     yield
 
-app = FastAPI(title="CAF C2 Backend", version="0.1.0", lifespan=lifespan)
+
+async def _connect_sitl():
+    """Try pymavlink connection in background thread. Stays in STUB if unreachable."""
+    loop = asyncio.get_event_loop()
+    connected = await loop.run_in_executor(None, dc.connect, SITL_ADDRESS)
+    if connected:
+        print("[BACKEND] pymavlink connected — LIVE mode")
+    else:
+        print("[BACKEND] pymavlink unavailable — STUB mode")
+
+
+app = FastAPI(title="CAF C2 Backend", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=["http://localhost:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ── In-memory simulated telemetry state ─────────────────────
-# Replace with real MAVSDK telemetry in Step 10
+# ── Compound telemetry state (New Mexico, local ENU coords) ──
+# Compound center: 32.990°N, 106.975°W
+# Positions approximate — drone starts at Landing Pad (-40, 0)
+COMPOUND_LAT  =  32.990
+COMPOUND_LNG  = -106.975
+DEG_PER_METER =  0.000009  # ~1m in degrees at this latitude
+
+def enu_to_latlng(enu_x: float, enu_y: float):
+    """Convert compound ENU (x=East, y=North) to lat/lng for map display."""
+    lat = COMPOUND_LAT + enu_y * DEG_PER_METER
+    lng = COMPOUND_LNG + enu_x * DEG_PER_METER
+    return round(lat, 6), round(lng, 6)
+
+# UAV-01 starts at Landing Pad (-40, 0)
+_uav01_lat, _uav01_lng = enu_to_latlng(-40, 0)
+
 FLEET_STATE = {
-    "UAV-01": {"lat": 49.2827, "lng": -123.1207, "altitude": 0,   "battery": 87.0, "speed": 0,  "heading": 45,  "flightMode": "HOLD",    "armed": False},
-    "UAV-02": {"lat": 49.2950, "lng": -123.1050, "altitude": 150, "battery": 62.0, "speed": 45, "heading": 270, "flightMode": "LOITER",  "armed": True},
-    "UGV-01": {"lat": 49.2700, "lng": -123.1350, "altitude": 0,   "battery": 73.0, "speed": 12, "heading": 90,  "flightMode": "PATROL",  "armed": False},
-    "UGV-02": {"lat": 49.2650, "lng": -123.1500, "altitude": 0,   "battery": 100.0,"speed": 0,  "heading": 0,   "flightMode": "STANDBY", "armed": False},
-    "USV-01": {"lat": 49.3100, "lng": -123.1800, "altitude": 0,   "battery": 55.0, "speed": 8,  "heading": 180, "flightMode": "PATROL",  "armed": False},
-    "UUV-01": {"lat": 49.3200, "lng": -123.2000, "altitude": -30, "battery": 91.0, "speed": 0,  "heading": 0,   "flightMode": "STANDBY", "armed": False},
+    "UAV-01": {"lat": _uav01_lat, "lng": _uav01_lng, "altitude": 0,
+                "battery": 95.0, "speed": 0, "heading": 353,
+                "flightMode": "STANDBY", "armed": False,
+                "local_x": -40, "local_y": 0},
 }
 
 active_connections: list[WebSocket] = []
@@ -67,7 +92,6 @@ def zulu_now() -> str:
 
 
 async def broadcast(message: dict):
-    """Send a message to all connected WebSocket clients."""
     data = json.dumps(message)
     for ws in list(active_connections):
         try:
@@ -77,42 +101,35 @@ async def broadcast(message: dict):
 
 
 async def telemetry_loop():
-    """Push telemetry for all drones every 500ms."""
+    """Push UAV-01 telemetry every 500ms."""
     import random
     while True:
-        for drone_id, state in FLEET_STATE.items():
-            # Simulate minor position drift for active units
-            if state["flightMode"] not in ("STANDBY", "HOLD"):
-                state["lat"]     += (random.random() - 0.5) * 0.0002
-                state["lng"]     += (random.random() - 0.5) * 0.0002
-                state["battery"] -= 0.01
-                state["battery"]  = max(0.0, state["battery"])
+        state = FLEET_STATE["UAV-01"]
+        if state["flightMode"] not in ("STANDBY", "HOLD", "LOITER"):
+            state["battery"] = max(0.0, state["battery"] - 0.01)
 
-            await broadcast({
-                "type":       "telemetry",
-                "droneId":    drone_id,
-                "lat":        round(state["lat"], 5),
-                "lng":        round(state["lng"], 5),
-                "altitude":   state["altitude"],
-                "battery":    round(state["battery"], 1),
-                "speed":      state["speed"],
-                "heading":    state["heading"],
-                "flightMode": state["flightMode"],
-                "armed":      state["armed"],
-                "timestamp":  zulu_now(),
-            })
+        await broadcast({
+            "type":       "telemetry",
+            "droneId":    "UAV-01",
+            "lat":        state["lat"],
+            "lng":        state["lng"],
+            "altitude":   state["altitude"],
+            "battery":    round(state["battery"], 1),
+            "speed":      state["speed"],
+            "heading":    state["heading"],
+            "flightMode": state["flightMode"],
+            "armed":      state["armed"],
+            "timestamp":  zulu_now(),
+        })
         await asyncio.sleep(0.5)
-
-
-# startup handled by lifespan context manager above
 
 
 @app.get("/health")
 async def health():
     return {
-        "status":    "online",
-        "drones":    list(FLEET_STATE.keys()),
-        "datalink":  "SIMULATED",  # becomes "LIVE" when MAVSDK connects
+        "status":   "online",
+        "datalink": "LIVE" if dc.is_connected() else "SIMULATED",
+        "sitl":     SITL_ADDRESS,
         "timestamp": zulu_now(),
     }
 
@@ -128,29 +145,44 @@ async def websocket_endpoint(ws: WebSocket):
             msg = json.loads(raw)
 
             if msg.get("type") == "command":
-                drone_id = msg.get("droneId", "")
+                drone_id = msg.get("droneId", "UAV-01")
                 action   = msg.get("action", "")
                 params   = msg.get("params", {})
 
-                # Dispatch to MAVSDK (stubbed in Step 9)
-                result = await dispatch(drone_id, action, params)
+                try:
+                    result = await dc.dispatch(drone_id, action, params)
+                except Exception as e:
+                    result = f"{action} FAILED: {e}"
+                    print(f"[CMD] {result}")
 
-                # Update simulated state
-                if drone_id in FLEET_STATE:
-                    if action == "TAKEOFF":
-                        FLEET_STATE[drone_id]["altitude"]   = params.get("altitude", 20)
-                        FLEET_STATE[drone_id]["flightMode"] = "TAKEOFF"
-                        FLEET_STATE[drone_id]["armed"]      = True
-                    elif action == "LAND":
-                        FLEET_STATE[drone_id]["altitude"]   = 0
-                        FLEET_STATE[drone_id]["flightMode"] = "STANDBY"
-                        FLEET_STATE[drone_id]["armed"]      = False
-                    elif action == "HOLD":
-                        FLEET_STATE[drone_id]["flightMode"] = "HOLD"
-                    elif action == "RTB":
-                        FLEET_STATE[drone_id]["flightMode"] = "RTB"
+                # Mirror command to simulated state for map display
+                state = FLEET_STATE.get("UAV-01", {})
+                if action == "TAKEOFF":
+                    state["altitude"]   = params.get("altitude", 10)
+                    state["flightMode"] = "GUIDED"
+                    state["armed"]      = True
+                elif action == "LAND":
+                    state["altitude"]   = 0
+                    state["flightMode"] = "STANDBY"
+                    state["armed"]      = False
+                elif action in ("HOLD", "HOVER"):
+                    state["flightMode"] = "LOITER"
+                elif action == "RTB":
+                    state["flightMode"] = "RTL"
+                    state["local_x"]    = -40
+                    state["local_y"]    = 0
+                    lat, lng = enu_to_latlng(-40, 0)
+                    state["lat"], state["lng"] = lat, lng
+                elif action in ("GOTO", "SCOUT", "MOVE", "DESCEND", "ASCEND"):
+                    lx = params.get("local_x", state.get("local_x", -40))
+                    ly = params.get("local_y", state.get("local_y", 0))
+                    state["local_x"] = lx
+                    state["local_y"] = ly
+                    lat, lng = enu_to_latlng(lx, ly)
+                    state["lat"], state["lng"] = lat, lng
+                    state["altitude"]   = params.get("altitude", state["altitude"])
+                    state["flightMode"] = "GUIDED"
 
-                # Send ack back to React
                 await ws.send_text(json.dumps({
                     "type":      "ack",
                     "droneId":   drone_id,
