@@ -18,6 +18,8 @@
 // ============================================================
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
 
 // ─────────────────────────────────────────────────────────────
 // DESIGN SYSTEM
@@ -74,24 +76,26 @@ const PIPELINE_STAGES = [
 ];
 
 const HIGH_RISK_ACTIONS = ["STRIKE","ENGAGE","FIRE","DESTROY","ATTACK","NEUTRALIZE","ELIMINATE","LAUNCH","ARM"];
+const INVALID_ACTIONS = ["SELF-DESTRUCT","SELF_DESTRUCT","KAMIKAZE","LAUNCH MISSILE","FIRE MISSILE","DROP BOMB","SHOOT","FIRE WEAPONS","KILL","TURN OFF ENGINES"];
+const NO_GO_ZONES = [
+  {name:"Fuel Depot",   keywords:["fuel depot","fuel_depot","FUEL_DEPOT"], rule:"NO ENTRY AT ANY ALTITUDE", msg:"Command rejected — Fuel Depot is a no-go zone. No flight within 10m radius at any altitude."},
+  {name:"Comms Tower",  keywords:["comms tower","comms_tower","COMMS_TOWER"], rule:"SAFE ONLY ABOVE 25m AGL", msg:"Command rejected — Comms Tower no-fly zone. Must be above 25m AGL to operate within 8m radius.", minAlt:25},
+];
 const clamp = (v,mn,mx) => Math.max(mn,Math.min(mx,v));
 const zuluNow = () => new Date().toUTCString().slice(17,25)+"Z";
 
+// Compound center: 32.990°N, 106.975°W | DEG_PER_M ≈ 0.000009
 const INITIAL_UXS = [
-  {id:"UAV-01",label:"Raven Alpha", domain:"AIR",     status:"STANDBY",  battery:87, signal:94,altitude:0,  speed:0, heading:45, lat:49.2827,lng:-123.1207,payload:"EO/IR Sensor",   armed:false,mission:"RECON",     tasks:[]},
-  {id:"UAV-02",label:"Hawk Bravo",  domain:"AIR",     status:"ACTIVE",   battery:62, signal:88,altitude:150,speed:45,heading:270,lat:49.2950,lng:-123.1050,payload:"Munition x2",    armed:true, mission:"STRIKE",    tasks:["Loiter Grid-7"]},
-  {id:"UGV-01",label:"Timber Wolf", domain:"LAND",    status:"EXECUTING",battery:73, signal:79,altitude:0,  speed:12,heading:90, lat:49.2700,lng:-123.1350,payload:"LIDAR + Camera", armed:false,mission:"PATROL",    tasks:["Advance Checkpoint-Delta"]},
-  {id:"UGV-02",label:"Iron Badger", domain:"LAND",    status:"STANDBY",  battery:100,signal:91,altitude:0,  speed:0, heading:0,  lat:49.2650,lng:-123.1500,payload:"EOD Suite",      armed:false,mission:"EOD",       tasks:[]},
-  {id:"USV-01",label:"Triton One",  domain:"MARITIME",status:"ACTIVE",   battery:55, signal:72,altitude:0,  speed:8, heading:180,lat:49.3100,lng:-123.1800,payload:"Sonar + Radar",  armed:false,mission:"ISR",       tasks:["Patrol Sector-Bravo"]},
-  {id:"UUV-01",label:"Deep Ghost",  domain:"MARITIME",status:"STANDBY",  battery:91, signal:43,altitude:-30,speed:0, heading:0,  lat:49.3200,lng:-123.2000,payload:"Acoustic Sensor",armed:false,mission:"SUBSURFACE",tasks:[]},
+  {id:"UAV-01",label:"Raven Alpha", domain:"AIR", status:"STANDBY", battery:95, signal:98, altitude:0, speed:0, heading:353, lat:32.990000, lng:-106.975360, payload:"EO/IR Sensor", armed:false, mission:"RECON", tasks:[]},
+  {id:"UAV-02",label:"Raven Bravo", domain:"AIR", status:"STANDBY", battery:88, signal:94, altitude:0, speed:0, heading:45,  lat:32.990333, lng:-106.974900, payload:"SAR Radar",    armed:false, mission:"PATROL", tasks:[]},
 ];
 
 const CONTACTS = [
-  {id:"C-001",iff:"FRIEND", label:"Alpha Platoon",    type:"GROUND_UNIT", lat:49.2700,lng:-123.1300},
-  {id:"C-002",iff:"FOE",    label:"Hostile Victor-1", type:"VEHICLE",     lat:49.2900,lng:-123.1100},
-  {id:"C-003",iff:"UNKNOWN",label:"Contact Unknown-3",type:"DISMOUNT",    lat:49.3100,lng:-123.1200},
-  {id:"C-004",iff:"FRIEND", label:"Bravo Section",    type:"GROUND_UNIT", lat:49.2600,lng:-123.1500},
-  {id:"C-005",iff:"FOE",    label:"Hostile Papa-7",   type:"EMPLACEMENT", lat:49.3000,lng:-123.0900},
+  {id:"C-001",iff:"FRIEND", label:"Alpha Squad",      type:"GROUND_UNIT", lat:32.990225,lng:-106.975180},
+  {id:"C-002",iff:"FOE",    label:"Hostile Victor-1", type:"VEHICLE",     lat:32.990333,lng:-106.974600},
+  {id:"C-003",iff:"UNKNOWN",label:"Contact Unknown",  type:"DISMOUNT",    lat:32.990090,lng:-106.974900},
+  {id:"C-004",iff:"FRIEND", label:"Bravo Team",       type:"GROUND_UNIT", lat:32.990090,lng:-106.974820},
+  {id:"C-005",iff:"FOE",    label:"Hostile Papa-7",   type:"EMPLACEMENT", lat:32.989820,lng:-106.974658},
 ];
 
 const DOMAIN_META = {
@@ -115,12 +119,21 @@ const IFF_META = {
 };
 
 const WAYPOINTS = [
-  {id:"WP-A", label:"Waypoint Alpha",   lat:49.2827, lng:-123.1207},
-  {id:"WP-B", label:"Waypoint Bravo",   lat:49.2900, lng:-123.1100},
-  {id:"WP-C", label:"Waypoint Charlie", lat:49.2750, lng:-123.1300},
-  {id:"WP-D", label:"Waypoint Delta",   lat:49.2680, lng:-123.1450},
-  {id:"WP-E", label:"Waypoint Echo",    lat:49.3050, lng:-123.1650},
-  {id:"WP-F", label:"Waypoint Foxtrot", lat:49.3150, lng:-123.1950},
+  {id:"LANDING_PAD",  label:"Landing Pad",       lat:32.990000, lng:-106.975360, enu_x:-40, enu_y:  0},
+  {id:"WEST_GATE",    label:"West Gate",          lat:32.990000, lng:-106.975540, enu_x:-60, enu_y:  0},
+  {id:"NW_TOWER",     label:"NW Watch Tower",     lat:32.990333, lng:-106.975513, enu_x:-57, enu_y: 37},
+  {id:"NE_TOWER",     label:"NE Watch Tower",     lat:32.990333, lng:-106.974487, enu_x: 57, enu_y: 37},
+  {id:"SW_TOWER",     label:"SW Watch Tower",     lat:32.989667, lng:-106.975513, enu_x:-57, enu_y:-37},
+  {id:"SE_TOWER",     label:"SE Watch Tower",     lat:32.989667, lng:-106.974487, enu_x: 57, enu_y:-37},
+  {id:"CMD_BUILDING", label:"Command Building",   lat:32.990090, lng:-106.974820, enu_x: 20, enu_y: 10},
+  {id:"ROOFTOP",      label:"Rooftop Structure",  lat:32.990126, lng:-106.974775, enu_x: 25, enu_y: 14},
+  {id:"BARRACKS_1",   label:"Barracks 1",         lat:32.990225, lng:-106.975180, enu_x:-20, enu_y: 25},
+  {id:"BARRACKS_2",   label:"Barracks 2",         lat:32.989775, lng:-106.975180, enu_x:-20, enu_y:-25},
+  {id:"MOTOR_POOL",   label:"Motor Pool",         lat:32.989820, lng:-106.974658, enu_x: 38, enu_y:-20},
+  {id:"CONTAINERS",   label:"Shipping Containers",lat:32.989865, lng:-106.975000, enu_x:  0, enu_y:-15},
+  {id:"COMMS_TOWER",  label:"Comms Tower ⚠",     lat:32.990270, lng:-106.974640, enu_x: 40, enu_y: 30},
+  {id:"FUEL_DEPOT",   label:"Fuel Depot ⛔",      lat:32.989712, lng:-106.975243, enu_x:-27, enu_y:-32},
+  {id:"RUBBLE",       label:"Rubble Area",        lat:32.990180, lng:-106.975045, enu_x: -5, enu_y: 20},
 ];
 
 // ─────────────────────────────────────────────────────────────
@@ -146,367 +159,329 @@ function runIFFCheck(parsedCommand, uxsList, contacts) {
     if(fc.length>0)warnings.push(`${fc.length} FRIENDLY unit(s) in operational picture`);
     if(uc.length>0)warnings.push(`${uc.length} UNKNOWN contact(s) — IFF not confirmed`);
   }
-  return{requiresConfirm,flags,warnings,targetContact,targetUnits,isHighRiskAction,armedTargets};
+  // No-go zone check
+  const areaLower=(parsedCommand.area||"").toLowerCase();
+  for(const zone of NO_GO_ZONES){
+    const hit=zone.keywords.some(k=>areaLower.includes(k.toLowerCase()));
+    if(hit){
+      const alt=parsedCommand.altitude||0;
+      if(!zone.minAlt||alt<zone.minAlt){
+        flags.push({type:"NO_GO_ZONE",severity:"CRITICAL",message:zone.msg});
+        requiresConfirm=false;  // hard reject — no confirmation allowed
+        return{requiresConfirm,flags,warnings,targetContact,targetUnits,isHighRiskAction,armedTargets,hardReject:true,rejectMsg:zone.msg};
+      }
+    }
+  }
+  // Invalid action check
+  const actionRaw=(parsedCommand.action||"").toUpperCase();
+  const isInvalid=INVALID_ACTIONS.some(inv=>actionRaw.includes(inv)||areaLower.includes(inv.toLowerCase()));
+  if(isInvalid){
+    const msg=`Command rejected — "${parsedCommand.action}" is not a valid drone operation.`;
+    flags.push({type:"INVALID_ACTION",severity:"CRITICAL",message:msg});
+    return{requiresConfirm,flags,warnings,targetContact,targetUnits,isHighRiskAction,armedTargets,hardReject:true,rejectMsg:msg};
+  }
+  return{requiresConfirm,flags,warnings,targetContact,targetUnits,isHighRiskAction,armedTargets,hardReject:false};
 }
 
 // ─────────────────────────────────────────────────────────────
-// COMPONENT: TacticalMap  ← NEW IN STEP 7
-//
-// HTML5 Canvas that draws the full battlefield picture.
-// Re-renders every time uxs or contacts change.
-//
-// What gets drawn:
-// 1. Background grid (coordinate reference lines)
-// 2. Grid labels (lat/lng coordinates at edges)
-// 3. Contact markers (IFF color coded diamonds)
-// 4. UxS markers (domain color coded with heading vectors)
-// 5. Selected unit ring (highlighted)
-// 6. Labels for all markers
-// 7. Map legend (bottom left)
-//
-// Coordinate system:
-// We map lat/lng to canvas pixels using a simple linear
-// projection. The map bounds are set around our operational area.
-//
-// Restaurant analogy: The live floor plan.
-// Every table (UxS), every customer (contact), every
-// section boundary (grid lines) drawn on one board.
-// Updates in real time as the floor changes.
+// COMPONENT: TacticalMap — 3D Three.js Rendering
 // ─────────────────────────────────────────────────────────────
-const MAP_BOUNDS = {
-  latMin: 49.240, latMax: 49.340,
-  lngMin: -123.230, lngMax: -123.060,
-};
+const ENU_CENTER = { lat: 32.990000, lng: -106.975360 };
+const DEG_PER_M  = 0.000009;
+function toENU(lat, lng) {
+  return [
+    (lng - ENU_CENTER.lng) / DEG_PER_M,
+    0,
+    -((lat - ENU_CENTER.lat) / DEG_PER_M),
+  ];
+}
+
+const STRUCTURES_3D = [
+  { id:"CMD",    pos:[20,  0,-10], size:[15,8,15],  color:"#0d1f0d", emissive:"#164716" },
+  { id:"BAR1",   pos:[-20, 0,-25], size:[20,5,10],  color:"#0a1a0a", emissive:"#112411" },
+  { id:"BAR2",   pos:[-20, 0, 25], size:[20,5,10],  color:"#0a1a0a", emissive:"#112411" },
+  { id:"MPOOL",  pos:[38,  0, 20], size:[18,3,15],  color:"#131208", emissive:"#1f1c0a" },
+  { id:"CONT1",  pos:[-3,  0, 15], size:[ 7,4, 3],  color:"#0a1212", emissive:"#0e1e1e" },
+  { id:"CONT2",  pos:[ 5,  0, 15], size:[ 7,4, 3],  color:"#0a1212", emissive:"#0e1e1e" },
+  { id:"ROOF",   pos:[25,  0,-14], size:[ 6,5, 6],  color:"#0d1a0d", emissive:"#152515" },
+  { id:"RUBBLE", pos:[-3,  0, 20], size:[ 4,2, 3],  color:"#0e1208", emissive:"#121508" },
+];
+const TOWER_POSITIONS_3D = [[-57,-37],[57,-37],[-57,37],[57,37]];
+
+function Building3D({ pos, size, color, emissive }) {
+  const [w,h,d] = size;
+  return (
+    <mesh position={[pos[0], h/2, pos[2]]} castShadow receiveShadow>
+      <boxGeometry args={[w, h, d]} />
+      <meshStandardMaterial color={color} emissive={emissive} emissiveIntensity={0.3} roughness={0.85} metalness={0.1} />
+    </mesh>
+  );
+}
+
+function WatchTower3D({ x, z }) {
+  return (
+    <group position={[x, 0, z]}>
+      <mesh position={[0,5,0]} castShadow>
+        <boxGeometry args={[2,10,2]} />
+        <meshStandardMaterial color="#0d2010" emissive="#00ff41" emissiveIntensity={0.08} roughness={0.9} />
+      </mesh>
+      <mesh position={[0,10.5,0]} castShadow>
+        <boxGeometry args={[4,1,4]} />
+        <meshStandardMaterial color="#0d2010" emissive="#00ff41" emissiveIntensity={0.12} roughness={0.9} />
+      </mesh>
+      <mesh position={[0,11.3,0]}>
+        <sphereGeometry args={[0.35,8,8]} />
+        <meshStandardMaterial color="#00ff41" emissive="#00ff41" emissiveIntensity={3} />
+      </mesh>
+      <pointLight position={[0,11.3,0]} color="#00ff41" intensity={1.5} distance={30} decay={2} />
+    </group>
+  );
+}
+
+function CommsTower3D() {
+  const beaconRef = useRef();
+  useFrame(({ clock }) => {
+    if (beaconRef.current) {
+      beaconRef.current.material.emissiveIntensity = 0.5 + Math.sin(clock.elapsedTime*3)*0.4;
+    }
+  });
+  return (
+    <group position={[40,0,-30]}>
+      <mesh position={[0,10,0]} castShadow>
+        <boxGeometry args={[1.5,20,1.5]} />
+        <meshStandardMaterial color="#1a1200" emissive="#f59e0b" emissiveIntensity={0.2} />
+      </mesh>
+      <mesh position={[3,20,0]} rotation={[0,0,-0.5]}>
+        <boxGeometry args={[5,0.3,0.3]} />
+        <meshStandardMaterial color="#1a1200" emissive="#f59e0b" emissiveIntensity={0.3} />
+      </mesh>
+      <mesh position={[0,21,0]} rotation={[0.4,0,0]}>
+        <cylinderGeometry args={[2.5,0.4,1,12]} />
+        <meshStandardMaterial color="#1a1200" emissive="#f59e0b" emissiveIntensity={0.25} />
+      </mesh>
+      <mesh ref={beaconRef} position={[0,21.5,0]}>
+        <sphereGeometry args={[0.4,8,8]} />
+        <meshStandardMaterial color="#f59e0b" emissive="#f59e0b" emissiveIntensity={0.5} />
+      </mesh>
+      <pointLight position={[0,21,0]} color="#f59e0b" intensity={2} distance={40} decay={2} />
+      <mesh position={[0,0.05,0]} rotation={[-Math.PI/2,0,0]}>
+        <ringGeometry args={[8,9,32]} />
+        <meshBasicMaterial color="#f59e0b" transparent opacity={0.12} side={2} />
+      </mesh>
+    </group>
+  );
+}
+
+function FuelDepot3D() {
+  return (
+    <group position={[-27,0,32]}>
+      <mesh position={[0,1.5,0]} castShadow>
+        <boxGeometry args={[12,3,12]} />
+        <meshStandardMaterial color="#1a0505" emissive="#ef4444" emissiveIntensity={0.15} roughness={0.9} />
+      </mesh>
+      {[[-3,0,-3],[3,0,-3],[0,0,3]].map(([tx,,tz],i) => (
+        <mesh key={i} position={[tx,3.5,tz]} castShadow>
+          <cylinderGeometry args={[1.8,1.8,5,12]} />
+          <meshStandardMaterial color="#220404" emissive="#ef4444" emissiveIntensity={0.1} />
+        </mesh>
+      ))}
+      <mesh position={[0,0.05,0]} rotation={[-Math.PI/2,0,0]}>
+        <ringGeometry args={[10,12,32]} />
+        <meshBasicMaterial color="#ef4444" transparent opacity={0.12} side={2} />
+      </mesh>
+      <pointLight position={[0,6,0]} color="#ef4444" intensity={1} distance={25} decay={2} />
+    </group>
+  );
+}
+
+function FoePulseRings({ color }) {
+  const r1 = useRef(), r2 = useRef();
+  useFrame(({ clock }) => {
+    const t1 = clock.elapsedTime % 2.5;
+    const t2 = (clock.elapsedTime + 1.25) % 2.5;
+    if (r1.current) {
+      const s = 1 + t1 * 4;
+      r1.current.scale.set(s,1,s);
+      if (r1.current.material) r1.current.material.opacity = Math.max(0, 0.5 - t1/2.5*0.5);
+    }
+    if (r2.current) {
+      const s = 1 + t2 * 4;
+      r2.current.scale.set(s,1,s);
+      if (r2.current.material) r2.current.material.opacity = Math.max(0, 0.5 - t2/2.5*0.5);
+    }
+  });
+  return (
+    <>
+      <mesh ref={r1} position={[0,-1.2,0]} rotation={[-Math.PI/2,0,0]}>
+        <ringGeometry args={[1.8,2.2,32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.5} side={2} />
+      </mesh>
+      <mesh ref={r2} position={[0,-1.2,0]} rotation={[-Math.PI/2,0,0]}>
+        <ringGeometry args={[1.8,2.2,32]} />
+        <meshBasicMaterial color={color} transparent opacity={0.3} side={2} />
+      </mesh>
+    </>
+  );
+}
+
+function ContactMarker3D({ contact }) {
+  const meshRef = useRef();
+  const iff = IFF_META[contact.iff] || IFF_META.NEUTRAL;
+  const isFoe = contact.iff === "FOE";
+  const [ex,,ez] = toENU(contact.lat, contact.lng);
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      meshRef.current.rotation.y += 0.008;
+      meshRef.current.position.y = 1.5 + Math.sin(clock.elapsedTime*1.2 + ex)*0.3;
+      if (isFoe && meshRef.current.material) {
+        meshRef.current.material.emissiveIntensity = 0.5 + Math.sin(clock.elapsedTime*3)*0.35;
+      }
+    }
+  });
+  return (
+    <group position={[ex, 0, ez]}>
+      <mesh ref={meshRef} castShadow>
+        <octahedronGeometry args={[1.5, 0]} />
+        <meshStandardMaterial color={iff.color} emissive={iff.color} emissiveIntensity={0.5} metalness={0.2} roughness={0.5} transparent opacity={0.9} />
+      </mesh>
+      <pointLight color={iff.color} intensity={0.6} distance={12} decay={2} />
+      {isFoe && <FoePulseRings color={iff.color} />}
+    </group>
+  );
+}
+
+const ARM_OFFSETS = [[-2,0,-2],[2,0,-2],[-2,0,2],[2,0,2]];
+
+function DroneUnit3D({ unit, isSelected, onSelect }) {
+  const groupRef = useRef();
+  const r0 = useRef(), r1 = useRef(), r2 = useRef(), r3 = useRef();
+  const rotorRefs = [r0, r1, r2, r3];
+  const [ex,,ez] = toENU(unit.lat, unit.lng);
+  const isAir = unit.domain === "AIR";
+  const baseAlt = isAir ? (unit.altitude > 0 ? unit.altitude : (unit.status !== "STANDBY" && unit.status !== "OFFLINE" ? 18 : 3)) : 0.5;
+  const domainColor = DOMAIN_META[unit.domain]?.hex || "#00d4ff";
+  const isMoving = unit.status === "ACTIVE" || unit.status === "EXECUTING";
+  useFrame(({ clock }) => {
+    const speed = isMoving ? 0.25 : 0.04;
+    rotorRefs.forEach((r, i) => {
+      if (r.current) r.current.rotation.y += (i % 2 === 0 ? speed : -speed);
+    });
+    if (groupRef.current && isAir) {
+      groupRef.current.position.y = baseAlt + Math.sin(clock.elapsedTime*1.8 + ex*0.1)*0.7;
+    }
+  });
+  return (
+    <group ref={groupRef} position={[ex, baseAlt, ez]} onClick={(e) => { e.stopPropagation(); onSelect(unit.id); }}>
+      <mesh castShadow>
+        <boxGeometry args={[2.8,0.55,2.8]} />
+        <meshStandardMaterial color={domainColor} emissive={domainColor} emissiveIntensity={isSelected?0.9:0.45} metalness={0.75} roughness={0.25} />
+      </mesh>
+      {ARM_OFFSETS.map(([ax,,az], i) => (
+        <group key={i} position={[ax,0,az]}>
+          <mesh>
+            <boxGeometry args={[0.2,0.1,0.2]} />
+            <meshStandardMaterial color="#1a1a1a" metalness={0.9} roughness={0.2} />
+          </mesh>
+          <mesh ref={rotorRefs[i]} position={[0,0.22,0]}>
+            <cylinderGeometry args={[1.0,1.0,0.04,16]} />
+            <meshStandardMaterial color={domainColor} emissive={domainColor} emissiveIntensity={0.9} transparent opacity={0.7} side={2} />
+          </mesh>
+        </group>
+      ))}
+      <mesh position={[0,-0.45,0.9]}>
+        <sphereGeometry args={[0.25,8,8]} />
+        <meshStandardMaterial color="#111" emissive="#ff5500" emissiveIntensity={0.6} />
+      </mesh>
+      {unit.armed && (
+        <mesh position={[0.7,0.4,-0.7]}>
+          <sphereGeometry args={[0.2,6,6]} />
+          <meshStandardMaterial color="#ef4444" emissive="#ef4444" emissiveIntensity={1.5} />
+        </mesh>
+      )}
+      {isSelected && (
+        <mesh rotation={[-Math.PI/2,0,0]}>
+          <ringGeometry args={[3.2,3.6,32]} />
+          <meshBasicMaterial color={domainColor} transparent opacity={0.75} side={2} />
+        </mesh>
+      )}
+      <pointLight color={domainColor} intensity={isSelected?2.5:0.8} distance={18} decay={2} />
+      {isAir && (
+        <mesh position={[0,-baseAlt/2,0]}>
+          <cylinderGeometry args={[0.02,0.02,baseAlt,4]} />
+          <meshBasicMaterial color={domainColor} transparent opacity={0.25} />
+        </mesh>
+      )}
+    </group>
+  );
+}
+
+function WaypointMarker3D({ wp }) {
+  const meshRef = useRef();
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      meshRef.current.rotation.y += 0.012;
+      meshRef.current.position.y = 2 + Math.sin(clock.elapsedTime*1.5 + wp.enu_x)*0.4;
+    }
+  });
+  return (
+    <group position={[wp.enu_x, 0, -wp.enu_y]}>
+      <mesh ref={meshRef} castShadow>
+        <coneGeometry args={[0.8,3,6]} />
+        <meshStandardMaterial color="#fb923c" emissive="#fb923c" emissiveIntensity={0.5} transparent opacity={0.85} />
+      </mesh>
+      <mesh position={[0,0.06,0]} rotation={[-Math.PI/2,0,0]}>
+        <ringGeometry args={[0.5,1.2,16]} />
+        <meshBasicMaterial color="#fb923c" transparent opacity={0.35} side={2} />
+      </mesh>
+    </group>
+  );
+}
+
+function CompoundPerimeter() {
+  return (
+    <group>
+      {[[0,0,40,120,1,1],[0,0,-40,120,1,1],[60,0,0,1,1,80],[-60,0,0,1,1,80]].map(([px,py,pz,sw,sh,sd],i)=>(
+        <mesh key={i} position={[px,0.5,pz]}>
+          <boxGeometry args={[sw,sh,sd]} />
+          <meshStandardMaterial color="#0a1f0a" emissive="#00ff41" emissiveIntensity={0.06} roughness={0.95} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function Scene3D({ uxs, contacts, waypoints, selectedId, executedIds, onSelectUnit }) {
+  return (
+    <>
+      <ambientLight intensity={0.12} color="#001a06" />
+      <directionalLight position={[60,100,40]} intensity={0.5} color="#00ff41" castShadow shadow-mapSize={[1024,1024]} />
+      <fog attach="fog" args={["#000000", 90, 320]} />
+      <mesh rotation={[-Math.PI/2,0,0]} receiveShadow>
+        <planeGeometry args={[400,400]} />
+        <meshStandardMaterial color="#010601" roughness={1} />
+      </mesh>
+      <gridHelper args={[400,80,"#071509","#030903"]} position={[0,0.01,0]} />
+      <CompoundPerimeter />
+      {TOWER_POSITIONS_3D.map(([x,z],i) => <WatchTower3D key={i} x={x} z={z} />)}
+      {STRUCTURES_3D.map(s => <Building3D key={s.id} pos={s.pos} size={s.size} color={s.color} emissive={s.emissive} />)}
+      <CommsTower3D />
+      <FuelDepot3D />
+      {(waypoints||[]).map(wp => <WaypointMarker3D key={wp.id} wp={wp} />)}
+      {contacts.map(c => <ContactMarker3D key={c.id} contact={c} />)}
+      {uxs.map(unit => <DroneUnit3D key={unit.id} unit={unit} isSelected={unit.id===selectedId} onSelect={onSelectUnit} />)}
+    </>
+  );
+}
 
 function TacticalMap({ uxs, contacts, waypoints, selectedId, executedIds, tick, onSelectUnit }) {
-  const canvasRef = useRef(null);
-
-  // Convert lat/lng to canvas x/y pixels
-  const toCanvas = useCallback((lat, lng, w, h) => {
-    const x = ((lng - MAP_BOUNDS.lngMin) / (MAP_BOUNDS.lngMax - MAP_BOUNDS.lngMin)) * w;
-    const y = h - ((lat - MAP_BOUNDS.latMin) / (MAP_BOUNDS.latMax - MAP_BOUNDS.latMin)) * h;
-    return { x, y };
-  }, []);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    const W = canvas.width;
-    const H = canvas.height;
-
-    // ── CLEAR ──────────────────────────────────────────────
-    ctx.clearRect(0, 0, W, H);
-
-    // ── BACKGROUND ─────────────────────────────────────────
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(0, 0, W, H);
-
-    // ── GRID LINES ─────────────────────────────────────────
-    // Draw lat/lng reference grid
-    ctx.strokeStyle = "rgba(0,255,65,0.06)";
-    ctx.lineWidth = 1;
-    const gridSteps = 8;
-    for (let i = 0; i <= gridSteps; i++) {
-      const x = (i / gridSteps) * W;
-      const y = (i / gridSteps) * H;
-      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-    }
-
-    // ── GRID LABELS ────────────────────────────────────────
-    ctx.fillStyle = "rgba(0,255,65,0.25)";
-    ctx.font = "9px 'Share Tech Mono'";
-    for (let i = 0; i <= gridSteps; i++) {
-      const lat = MAP_BOUNDS.latMin + (i/gridSteps)*(MAP_BOUNDS.latMax-MAP_BOUNDS.latMin);
-      const lng = MAP_BOUNDS.lngMin + (i/gridSteps)*(MAP_BOUNDS.lngMax-MAP_BOUNDS.lngMin);
-      const y = H - (i/gridSteps)*H;
-      ctx.fillText(lat.toFixed(3)+"°N", 4, y-2);
-      const x = (i/gridSteps)*W;
-      ctx.fillText(lng.toFixed(2)+"°", x+2, H-4);
-    }
-
-    // ── DRAW HELPER: heading vector ─────────────────────────
-    // Draws an arrow showing which direction the unit is moving
-    const drawHeadingVector = (cx, cy, heading, len, color) => {
-      const rad = (heading - 90) * Math.PI / 180;
-      const ex = cx + Math.cos(rad) * len;
-      const ey = cy + Math.sin(rad) * len;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(ex, ey);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      // Arrowhead
-      const arrowSize = 5;
-      const angle = Math.atan2(ey-cy, ex-cx);
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - arrowSize*Math.cos(angle-0.4), ey - arrowSize*Math.sin(angle-0.4));
-      ctx.lineTo(ex - arrowSize*Math.cos(angle+0.4), ey - arrowSize*Math.sin(angle+0.4));
-      ctx.closePath();
-      ctx.fill();
-    };
-
-    // ── FOE THREAT PULSE RINGS ──────────────────────────────
-    // Expanding rings animate using tick % 20 (200ms × 20 = 4s cycle)
-    const phase = (tick % 20) / 20;          // 0→1 over 4 seconds
-    const phase2 = ((tick + 10) % 20) / 20;  // offset second ring
-    contacts.filter(c=>c.iff==="FOE").forEach(contact=>{
-      const {x,y}=toCanvas(contact.lat,contact.lng,W,H);
-      [phase,phase2].forEach(p=>{
-        const r=14+p*36;
-        const alpha=(1-p)*0.5;
-        ctx.strokeStyle=`rgba(239,68,68,${alpha})`;
-        ctx.lineWidth=1.5;
-        ctx.beginPath();
-        ctx.arc(x,y,r,0,Math.PI*2);
-        ctx.stroke();
-      });
-    });
-
-    // ── DRAW CONTACTS ───────────────────────────────────────
-    // Diamond shape with IFF color
-    contacts.forEach(contact => {
-      const {x,y} = toCanvas(contact.lat, contact.lng, W, H);
-      const iff = IFF_META[contact.iff] || IFF_META.NEUTRAL;
-      const size = 8;
-
-      // Outer glow
-      ctx.shadowColor = iff.color;
-      ctx.shadowBlur = 8;
-
-      // Diamond shape
-      ctx.fillStyle = iff.color + "33";
-      ctx.strokeStyle = iff.color;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(x, y-size);
-      ctx.lineTo(x+size, y);
-      ctx.lineTo(x, y+size);
-      ctx.lineTo(x-size, y);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-
-      // IFF indicator dot inside diamond
-      ctx.fillStyle = iff.color;
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI*2);
-      ctx.fill();
-
-      // Label
-      ctx.fillStyle = iff.color;
-      ctx.font = "bold 8px 'Share Tech Mono'";
-      ctx.fillText(contact.label.substring(0,12), x+size+3, y+3);
-      ctx.fillStyle = iff.color + "99";
-      ctx.font = "7px 'Share Tech Mono'";
-      ctx.fillText(`[${contact.iff}]`, x+size+3, y+12);
-    });
-
-    // ── DRAW UxS UNITS ──────────────────────────────────────
-    uxs.forEach(unit => {
-      const {x,y} = toCanvas(unit.lat, unit.lng, W, H);
-      const domain = DOMAIN_META[unit.domain];
-      const isSelected = unit.id === selectedId;
-      const isExecuted = (executedIds||[]).includes(unit.id);
-      const isMoving = unit.status !== "STANDBY" && unit.status !== "OFFLINE";
-
-      // Heading vector for moving units
-      if (isMoving && unit.speed > 0) {
-        drawHeadingVector(x, y, unit.heading, 28, domain.hex + "88");
-      }
-
-      // Selection ring
-      if (isSelected) {
-        ctx.strokeStyle = domain.hex;
-        ctx.lineWidth = 1.5;
-        ctx.setLineDash([4,4]);
-        ctx.beginPath();
-        ctx.arc(x, y, 18, 0, Math.PI*2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-
-      // Execution pulse ring
-      if (isExecuted || unit.status === "EXECUTING") {
-        ctx.strokeStyle = domain.hex + "66";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(x, y, 22, 0, Math.PI*2);
-        ctx.stroke();
-      }
-
-      // Unit outer glow
-      ctx.shadowColor = domain.hex;
-      ctx.shadowBlur = isSelected ? 16 : 8;
-
-      // Unit circle
-      const radius = isSelected ? 10 : 8;
-      ctx.fillStyle = domain.hex + "33";
-      ctx.strokeStyle = domain.hex;
-      ctx.lineWidth = isSelected ? 2 : 1.5;
-      ctx.beginPath();
-      ctx.arc(x, y, radius, 0, Math.PI*2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.shadowBlur = 0;
-
-      // ARMED indicator — red dot
-      if (unit.armed) {
-        ctx.fillStyle = "#ef4444";
-        ctx.shadowColor = "#ef4444";
-        ctx.shadowBlur = 4;
-        ctx.beginPath();
-        ctx.arc(x+7, y-7, 3, 0, Math.PI*2);
-        ctx.fill();
-        ctx.shadowBlur = 0;
-      }
-
-      // Status indicator ring color
-      const statusColor = STATUS_META[unit.status]?.color || "#6b7280";
-      ctx.strokeStyle = statusColor;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.arc(x, y, radius+3, 0, Math.PI*2);
-      ctx.stroke();
-
-      // Label offset — connector line then text above-right
-      const lox = x + radius + 5;
-      const loy = y - radius - 8;
-      ctx.strokeStyle = domain.hex + "55";
-      ctx.lineWidth = 0.5;
-      ctx.setLineDash([2,2]);
-      ctx.beginPath();
-      ctx.moveTo(x, y - radius);
-      ctx.lineTo(lox, loy + 4);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Unit ID
-      ctx.fillStyle = domain.hex;
-      ctx.font = `bold ${isSelected?10:9}px 'Share Tech Mono'`;
-      ctx.fillText(unit.id, lox, loy);
-
-      // Callsign
-      ctx.fillStyle = domain.hex + "bb";
-      ctx.font = "7px 'Share Tech Mono'";
-      ctx.fillText(unit.label, lox, loy - 10);
-    });
-
-    // ── MAP LEGEND ──────────────────────────────────────────
-    const lx = 10, ly = H - 90;
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
-    ctx.fillRect(lx-4, ly-14, 160, 88);
-    ctx.strokeStyle = "rgba(0,255,65,0.2)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(lx-4, ly-14, 160, 88);
-
-    ctx.font = "bold 8px 'Orbitron'";
-    ctx.fillStyle = "rgba(0,255,65,0.6)";
-    ctx.fillText("LEGEND", lx, ly);
-
-    const legendItems = [
-      {color:"#00d4ff",  label:"AIR UxS"},
-      {color:"#f59e0b",  label:"LAND UxS"},
-      {color:"#a78bfa",  label:"MARITIME UxS"},
-      {color:"#00ff41",  label:"FRIEND"},
-      {color:"#ef4444",  label:"FOE"},
-      {color:"#f59e0b",  label:"UNKNOWN"},
-    ];
-    legendItems.forEach((item, i) => {
-      const iy = ly + 10 + i*11;
-      ctx.fillStyle = item.color;
-      ctx.shadowColor = item.color;
-      ctx.shadowBlur = 3;
-      ctx.beginPath();
-      ctx.arc(lx+4, iy, 3, 0, Math.PI*2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = "rgba(255,255,255,0.6)";
-      ctx.font = "8px 'Share Tech Mono'";
-      ctx.fillText(item.label, lx+12, iy+3);
-    });
-
-    // ── CORNER MARKERS ─────────────────────────────────────
-    const corners = [[0,0,1,0,0,1],[W,0,-1,0,0,1],[0,H,1,0,0,-1],[W,H,-1,0,0,-1]];
-    corners.forEach(([cx,cy,dx,dy,ex,ey]) => {
-      ctx.strokeStyle = "rgba(0,255,65,0.4)";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(cx+dx*20, cy);
-      ctx.lineTo(cx, cy);
-      ctx.lineTo(cx, cy+ey*20);
-      ctx.stroke();
-    });
-
-    // ── DRAW WAYPOINTS ──────────────────────────────────────
-    // Render as orange triangles with WP label
-    (waypoints || []).forEach(wp => {
-      const {x, y} = toCanvas(wp.lat, wp.lng, W, H);
-      const WP_COLOR = "#fb923c"; // orange
-
-      // Triangle marker
-      const size = 7;
-      ctx.beginPath();
-      ctx.moveTo(x, y - size);
-      ctx.lineTo(x + size, y + size * 0.6);
-      ctx.lineTo(x - size, y + size * 0.6);
-      ctx.closePath();
-      ctx.fillStyle = `rgba(251,146,60,0.2)`;
-      ctx.fill();
-      ctx.strokeStyle = WP_COLOR;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-
-      // Glow dot at center
-      ctx.beginPath();
-      ctx.arc(x, y, 2, 0, Math.PI * 2);
-      ctx.fillStyle = WP_COLOR;
-      ctx.fill();
-
-      // Short ID label (WP-A etc)
-      ctx.fillStyle = WP_COLOR;
-      ctx.font = "bold 9px 'Share Tech Mono'";
-      ctx.fillText(wp.id, x + 10, y + 4);
-    });
-
-    // ── COORDINATES BAR ────────────────────────────────────
-    ctx.fillStyle = "rgba(0,255,65,0.15)";
-    ctx.font = "9px 'Share Tech Mono'";
-    ctx.fillText("49°17'N · 123°07'W · MGRS: 10U EE 23456 78901", W/2-150, H-6);
-
-  }, [uxs, contacts, waypoints, selectedId, executedIds, tick, toCanvas]);
-
-  // Map click — find nearest UxS within 20px and select it
-  const handleCanvasClick = useCallback((e) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    let closest = null, closestDist = 20;
-    uxs.forEach(unit => {
-      const {x, y} = toCanvas(unit.lat, unit.lng, canvas.width, canvas.height);
-      const d = Math.sqrt((cx-x)**2 + (cy-y)**2);
-      if (d < closestDist) { closestDist = d; closest = unit; }
-    });
-    if (closest && onSelectUnit) onSelectUnit(closest.id);
-  }, [uxs, toCanvas, onSelectUnit]);
-
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-void)" }}>
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 16px", borderBottom:"1px solid var(--border)" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 16px", borderBottom:"1px solid var(--border)", flexShrink:0 }}>
         <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
           <div style={{ width:"3px", height:"20px", background:"var(--cyan-air)", boxShadow:"0 0 8px var(--cyan-air)" }}/>
-          <span style={{ fontFamily:"var(--font-display)", fontSize:"11px", letterSpacing:"3px", color:"var(--cyan-air)", fontWeight:700 }}>⊕ TACTICAL DISPLAY</span>
+          <span style={{ fontFamily:"var(--font-display)", fontSize:"11px", letterSpacing:"3px", color:"var(--cyan-air)", fontWeight:700 }}>&#8853; TACTICAL DISPLAY &mdash; 3D</span>
         </div>
-        <div style={{ display:"flex", gap:"12px" }}>
+        <div style={{ display:"flex", gap:"10px", alignItems:"center" }}>
           {[{color:"#00d4ff",label:"AIR"},{color:"#f59e0b",label:"LAND"},{color:"#a78bfa",label:"SEA"}].map(d=>(
             <div key={d.label} style={{ display:"flex", alignItems:"center", gap:"4px" }}>
               <div style={{ width:"6px", height:"6px", borderRadius:"50%", background:d.color, boxShadow:`0 0 4px ${d.color}` }}/>
@@ -519,22 +494,32 @@ function TacticalMap({ uxs, contacts, waypoints, selectedId, executedIds, tick, 
               <span style={{ fontSize:"9px", color:d.color, letterSpacing:"1px" }}>{d.label}</span>
             </div>
           ))}
-          <div style={{ display:"flex", alignItems:"center", gap:"4px" }}>
-            <div style={{ width:0, height:0, borderLeft:"5px solid transparent", borderRight:"5px solid transparent", borderBottom:"8px solid #fb923c" }}/>
-            <span style={{ fontSize:"9px", color:"#fb923c", letterSpacing:"1px" }}>WAYPOINT</span>
-          </div>
+          <span style={{ fontSize:"8px", color:"var(--text-dim)", letterSpacing:"1px" }}>DRAG&middot;ORBIT | SCROLL&middot;ZOOM | CLICK&middot;SELECT</span>
         </div>
       </div>
-
-      {/* Canvas fills remaining space */}
       <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-        <canvas
-          ref={canvasRef}
-          width={800}
-          height={600}
-          onClick={handleCanvasClick}
-          style={{ width:"100%", height:"100%", display:"block", cursor:"crosshair" }}
-        />
+        <Canvas
+          shadows
+          camera={{ position:[0,90,70], fov:45, near:0.1, far:1000 }}
+          style={{ background:"#000000", width:"100%", height:"100%" }}
+          gl={{ antialias:true, alpha:false }}
+        >
+          <Scene3D
+            uxs={uxs}
+            contacts={contacts}
+            waypoints={waypoints}
+            selectedId={selectedId}
+            executedIds={executedIds}
+            onSelectUnit={onSelectUnit}
+          />
+          <OrbitControls
+            target={[0,0,0]}
+            minDistance={15}
+            maxDistance={250}
+            maxPolarAngle={Math.PI/2.1}
+            makeDefault
+          />
+        </Canvas>
       </div>
     </div>
   );
@@ -882,6 +867,7 @@ export default function App() {
   useEffect(()=>{
     const WS_URL = "ws://127.0.0.1:8765/ws";
     let reconnectTimer = null;
+    let hasLoggedDisconnect = false;
 
     const connect = () => {
       const ws = new WebSocket(WS_URL);
@@ -889,6 +875,7 @@ export default function App() {
 
       ws.onopen = () => {
         setWsStatus("LIVE");
+        hasLoggedDisconnect = false;
         addLog("DATALINK: Backend WebSocket connected — LIVE telemetry active","EXECUTED");
       };
 
@@ -922,7 +909,10 @@ export default function App() {
 
       ws.onclose = () => {
         setWsStatus("SIMULATED");
-        addLog("DATALINK: Backend disconnected — reverting to SIMULATED","PENDING");
+        if(!hasLoggedDisconnect){
+          hasLoggedDisconnect = true;
+          addLog("DATALINK: Backend disconnected — reverting to SIMULATED","PENDING");
+        }
         reconnectTimer = setTimeout(connect, 4000);
       };
     };
@@ -998,7 +988,12 @@ export default function App() {
           type:"command",
           droneId,
           action:command.action,
-          params:command.area?{area:command.area}:{},
+          params:{
+            area:     command.area||null,
+            altitude: command.altitude||null,
+            local_x:  command.local_x||null,
+            local_y:  command.local_y||null,
+          },
           timestamp:zuluNow(),
         }));
       });
@@ -1008,6 +1003,12 @@ export default function App() {
 
   const handleIFF=useCallback((command)=>{
     const iffResult=runIFFCheck(command,INITIAL_UXS,CONTACTS);
+    if(iffResult.hardReject){
+      addLog(`IFF: REJECTED — ${iffResult.rejectMsg}`,"DENIED");
+      setPipelineStage(null);
+      setParsedCommand(null);
+      return;
+    }
     if(iffResult.requiresConfirm){
       setPipelineStage("CONFIRM");
       setPendingConfirm({command,iffResult});
@@ -1042,19 +1043,29 @@ export default function App() {
     addLog(`VOICE: "${text}"`,"INFO");
     const fleetSummary=INITIAL_UXS.map(u=>`${u.id} (${u.label}, ${u.domain}, status:${u.status}, armed:${u.armed})`).join("; ");
     const contactSummary=CONTACTS.map(c=>`${c.id}:${c.label}[${c.iff}]`).join(", ");
-    const waypointSummary=WAYPOINTS.map(w=>`${w.id} (${w.label})`).join(", ");
-    const systemPrompt=`You are a military C2 AI for CAF Uncrewed Systems operations.
-Parse battlefield voice commands into structured JSON operational tasks.
-Available UxS fleet: ${fleetSummary}
-Known battlefield contacts: ${contactSummary}
-Named waypoints: ${waypointSummary}
-Respond with ONLY a valid JSON object. No explanation, no markdown, no backticks.
-Use this exact schema:
-{"targets":["array of UxS IDs, or ALL, or domain like AIR/LAND/MARITIME"],"action":"RECON|MOVE|HOLD|RTB|STRIKE|ENGAGE|PATROL|LOITER|SCAN|ARM|DISARM|STATUS|TAKEOFF|LAND|GOTO|SCOUT","area":"location, sector, or waypoint ID (e.g. WP-A) or null","contact":"contact ID or label if targeting a specific contact or null","priority":"IMMEDIATE|URGENT|ROUTINE","riskLevel":"HIGH|MEDIUM|LOW","message":"one sentence plain English summary of the command"}
-TAKEOFF = launch an AIR unit from ground. LAND = bring an AIR unit down. GOTO = navigate to a named waypoint or area. SCOUT = advance recon of an area or contact.
-HIGH risk = any action involving weapons, engagement, strike, fire, destroy, neutralize.
-MEDIUM risk = GOTO into unknown/contested areas, SCOUT near FOE contacts.
-LOW risk = TAKEOFF, LAND, RECON, PATROL, HOLD, RTB, STATUS, SCOUT in clear areas.`;
+    const systemPrompt=`You are a military drone C2 AI for a simulated compound operation.
+COMPOUND CENTER: 32.990°N, 106.975°W | DRONE HOME: Landing Pad at local ENU (-40, 0)
+
+KNOWN LOCATIONS (use exact id and local ENU x,y):
+LANDING_PAD(-40,0) WEST_GATE(-60,0) NW_TOWER(-57,37) NE_TOWER(57,37) SW_TOWER(-57,-37) SE_TOWER(57,-37)
+CMD_BUILDING(20,10) ROOFTOP(25,14) BARRACKS_1(-20,25) BARRACKS_2(-20,-25)
+MOTOR_POOL(38,-20) CONTAINERS(0,-15) COMMS_TOWER(40,30) FUEL_DEPOT(-27,-32) RUBBLE(-5,20)
+
+NO-GO ZONES (ALWAYS set valid:false):
+1. FUEL_DEPOT(-27,-32): No flight within 10m at ANY altitude
+2. COMMS_TOWER(40,30): No flight within 8m below 25m AGL
+
+INVALID ACTIONS (ALWAYS set valid:false): self-destruct, kamikaze, launch missile, fire weapons, shoot, attack, drop bomb, turn off engines
+
+VALID ACTIONS: TAKEOFF, LAND, GOTO, RTB, HOVER, ORBIT, DESCEND, ASCEND, REPORT, SCOUT
+
+Available fleet: ${fleetSummary}
+Known contacts: ${contactSummary}
+
+Respond ONLY with valid JSON. No markdown, no backticks.
+Schema:
+{"targets":["UAV-01"],"action":"TAKEOFF|LAND|GOTO|RTB|HOVER|ORBIT|DESCEND|ASCEND|REPORT|SCOUT","area":"location id or null","local_x":number_or_null,"local_y":number_or_null,"altitude":number_or_null,"contact":"contact id or null","priority":"IMMEDIATE|URGENT|ROUTINE","riskLevel":"HIGH|MEDIUM|LOW","valid":true_or_false,"rejection_reason":"string or null","message":"one sentence summary"}
+HIGH risk = weapons/engagement. MEDIUM = GOTO unknown/FOE area. LOW = TAKEOFF/LAND/RECON/HOLD/RTB.`;
     try{
       const response=await fetch("https://api.anthropic.com/v1/messages",{
         method:"POST",
@@ -1066,6 +1077,12 @@ LOW risk = TAKEOFF, LAND, RECON, PATROL, HOLD, RTB, STATUS, SCOUT in clear areas
       const rawText=data.content.filter(b=>b.type==="text").map(b=>b.text).join("");
       const clean=rawText.replace(/```json|```/g,"").trim();
       const parsed=JSON.parse(clean);
+      // Claude signals invalid/rejected commands via valid:false
+      if(parsed.valid===false){
+        addLog(`IFF: REJECTED — ${parsed.rejection_reason||"Command rejected — invalid operation"}`,"DENIED");
+        setPipelineStage(null);
+        return;
+      }
       setParsedCommand(parsed);
       addLog(`PARSED: ${parsed.action} → [${(parsed.targets||[]).join(",")}] — ${parsed.riskLevel} RISK`,"PARSED");
       handleIFF(parsed);
